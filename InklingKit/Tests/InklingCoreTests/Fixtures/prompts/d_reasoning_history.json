@@ -1,0 +1,20 @@
+{
+ "messages": [
+  {
+   "role": "user",
+   "content": "2+2?"
+  },
+  {
+   "role": "assistant",
+   "reasoning_content": "Simple sum.",
+   "content": "4"
+  },
+  {
+   "role": "user",
+   "content": "And 3+3?"
+  }
+ ],
+ "tools": [],
+ "effort": "high",
+ "expected": "<|message_system|><|content_text|>Thinking effort level: 0.9<|end_message|><|message_user|><|content_text|>2+2?<|end_message|><|message_model|><|content_thinking|>Simple sum.<|end_message|><|message_model|><|content_text|>4<|end_message|><|content_model_end_sampling|><|message_user|><|content_text|>And 3+3?<|end_message|>"
+}

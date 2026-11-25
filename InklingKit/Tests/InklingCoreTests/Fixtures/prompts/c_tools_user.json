@@ -1,0 +1,53 @@
+{
+ "messages": [
+  {
+   "role": "system",
+   "content": "Use tools."
+  },
+  {
+   "role": "user",
+   "content": "Weather in Paris?"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "web_search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "What to search"
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "calculator",
+    "description": "Evaluate math.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "expression": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "expression"
+     ]
+    }
+   }
+  }
+ ],
+ "effort": "low",
+ "expected": "<|message_system|>tool_declare<|content_xml|>[{\"description\":\"Search the web.\",\"name\":\"web_search\",\"parameters\":{\"properties\":{\"query\":{\"description\":\"What to search\",\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"},\"type\":\"function\"},{\"description\":\"Evaluate math.\",\"name\":\"calculator\",\"parameters\":{\"properties\":{\"expression\":{\"type\":\"string\"}},\"required\":[\"expression\"],\"type\":\"object\"},\"type\":\"function\"}]<|end_message|><|message_system|><|content_text|>Use tools.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.2<|end_message|><|message_user|><|content_text|>Weather in Paris?<|end_message|>"
+}

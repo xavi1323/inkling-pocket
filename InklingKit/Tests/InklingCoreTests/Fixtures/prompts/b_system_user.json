@@ -1,0 +1,15 @@
+{
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are Inkling."
+  },
+  {
+   "role": "user",
+   "content": "Hi there"
+  }
+ ],
+ "tools": [],
+ "effort": "medium",
+ "expected": "<|message_system|><|content_text|>You are Inkling.<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.7<|end_message|><|message_user|><|content_text|>Hi there<|end_message|>"
+}

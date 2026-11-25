@@ -1,0 +1,11 @@
+{
+ "messages": [
+  {
+   "role": "user",
+   "content": "Hello"
+  }
+ ],
+ "tools": [],
+ "effort": "low",
+ "expected": "<|message_system|><|content_text|>Thinking effort level: 0.2<|end_message|><|message_user|><|content_text|>Hello<|end_message|>"
+}

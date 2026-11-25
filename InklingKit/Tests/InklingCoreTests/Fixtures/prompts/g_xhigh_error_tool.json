@@ -1,0 +1,31 @@
+{
+ "messages": [
+  {
+   "role": "user",
+   "content": "Open it"
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "open_url",
+      "arguments": {
+       "url": "https://x.y/a?b=c"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "name": "open_url",
+   "content": "Error: unsupported content type: application/pdf"
+  }
+ ],
+ "tools": [],
+ "effort": "xhigh",
+ "expected": "<|message_system|><|content_text|>Thinking effort level: 0.99<|end_message|><|message_user|><|content_text|>Open it<|end_message|><|message_model|>open_url<|content_invoke_tool_json|>{\"name\":\"open_url\",\"args\":{\"url\":\"https://x.y/a?b=c\"}}<|end_message|><|content_model_end_sampling|><|message_tool|>open_url<|content_text|>Error: unsupported content type: application/pdf<|end_message|>"
+}

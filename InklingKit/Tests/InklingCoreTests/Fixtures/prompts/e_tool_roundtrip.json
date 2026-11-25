@@ -1,0 +1,67 @@
+{
+ "messages": [
+  {
+   "role": "user",
+   "content": "Search cats"
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "type": "function",
+     "function": {
+      "name": "web_search",
+      "arguments": {
+       "query": "cats",
+       "options": {
+        "z": 1,
+        "a": [
+         1.5,
+         true,
+         null
+        ]
+       }
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "name": "web_search",
+   "content": "Cats are mammals."
+  },
+  {
+   "role": "assistant",
+   "content": "Cats are mammals [1]."
+  },
+  {
+   "role": "user",
+   "content": "Thanks"
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "web_search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string",
+       "description": "What to search"
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   }
+  }
+ ],
+ "effort": "low",
+ "expected": "<|message_system|>tool_declare<|content_xml|>[{\"description\":\"Search the web.\",\"name\":\"web_search\",\"parameters\":{\"properties\":{\"query\":{\"description\":\"What to search\",\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"},\"type\":\"function\"}]<|end_message|><|message_system|><|content_text|>Thinking effort level: 0.2<|end_message|><|message_user|><|content_text|>Search cats<|end_message|><|message_model|>web_search<|content_invoke_tool_json|>{\"name\":\"web_search\",\"args\":{\"options\":{\"z\":1,\"a\":[1.5,true,null]},\"query\":\"cats\"}}<|end_message|><|content_model_end_sampling|><|message_tool|>web_search<|content_text|>Cats are mammals.<|end_message|><|message_model|><|content_text|>Cats are mammals [1].<|end_message|><|content_model_end_sampling|><|message_user|><|content_text|>Thanks<|end_message|>"
+}

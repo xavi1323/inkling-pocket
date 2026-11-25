@@ -1,0 +1,11 @@
+{
+ "messages": [
+  {
+   "role": "user",
+   "content": "Café ☕ 日本 \"quoted\"\nnew line"
+  }
+ ],
+ "tools": [],
+ "effort": "none",
+ "expected": "<|message_system|><|content_text|>Thinking effort level: 0<|end_message|><|message_user|><|content_text|>Café ☕ 日本 \"quoted\"\nnew line<|end_message|>"
+}
