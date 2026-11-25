@@ -1,0 +1,8 @@
+{
+ "base_url": "https://example.org/dir/page.html",
+ "raw": "# Main Title\nFirst paragraph with **bold** , _italic_ and [a link](https://example.org/rel/link).\nSecond para & entities -- (C) 2026  spaced out. Cafe 'quote'\n## Sub _heading_\nText with `inline code` and [titled](https://example.com \"Ex\").\n",
+ "citations": "# Main Title\nFirst paragraph with **bold** , _italic_ and a link⟨1⟩.\nSecond para & entities -- (C) 2026  spaced out. Cafe 'quote'\n## Sub _heading_\nText with `inline code` and titled⟨2⟩.\n",
+ "references": "\n\n## References\n\n⟨1⟩ https://example.org/rel/link: a link\n⟨2⟩ https://example.com: Ex - titled\n",
+ "fit": "# Main Title\nFirst paragraph with **bold** , _italic_ and [a link](https://example.org/rel/link).\nSecond para & entities — © 2026 spaced out. Café ’quote’\n## Sub _heading_\nText with `inline code` and [titled](https://example.com \"Ex\").\n",
+ "fit_block_count": 5
+}

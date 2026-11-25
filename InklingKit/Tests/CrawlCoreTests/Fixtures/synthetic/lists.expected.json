@@ -1,0 +1,8 @@
+{
+ "base_url": "https://example.org/dir/page.html",
+ "raw": "  * One\n  * Two\n    * Nested A\n    * Nested B\n  * Three\n\n\n  3. Third\n  4. Fourth\n    1. Inner\n\n\nAfter list. \n\nTerm\n    Definition here\n\nTerm2\n    Def2\n",
+ "citations": "  * One\n  * Two\n    * Nested A\n    * Nested B\n  * Three\n\n\n  3. Third\n  4. Fourth\n    1. Inner\n\n\nAfter list. \n\nTerm\n    Definition here\n\nTerm2\n    Def2\n",
+ "references": "\n\n## References\n\n",
+ "fit": "  * One\n  * Two\n    * Nested A\n    * Nested B\n  * Three\n\n\n  3. Third\n  4. Fourth\n    1. Inner\n\n\nAfter list. \n\nTerm\n    Definition here\n\nTerm2\n    Def2\n",
+ "fit_block_count": 4
+}

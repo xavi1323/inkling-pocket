@@ -14,3 +14,4 @@ DerivedData/
 .venv/
 .superpowers/
 .DS_Store
+InklingKit/Tests/CrawlCoreTests/Fixtures/local-pages/

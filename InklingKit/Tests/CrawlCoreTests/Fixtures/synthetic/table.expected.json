@@ -1,0 +1,8 @@
+{
+ "base_url": "https://example.org/dir/page.html",
+ "raw": "Before table.  \nCaps  \n| Name | Size |  \n| --- | --- |  \n| Alpha | 1 |  \n| [Beta](https://example.org/dir/b.html) | 2 **MB** |  \nAfter.\n",
+ "citations": "Before table.  \nCaps  \n| Name | Size |  \n| --- | --- |  \n| Alpha | 1 |  \n| Beta⟨1⟩ | 2 **MB** |  \nAfter.\n",
+ "references": "\n\n## References\n\n⟨1⟩ https://example.org/dir/b.html: Beta\n",
+ "fit": "Before table.  \nCaps  \n| Name | Size |  \n| --- | --- |  \n| Alpha | 1 |  \n| 2 **MB** |  \nAfter.\n",
+ "fit_block_count": 3
+}

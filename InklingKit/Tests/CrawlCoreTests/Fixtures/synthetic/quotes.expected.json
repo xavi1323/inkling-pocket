@@ -1,0 +1,8 @@
+{
+ "base_url": "https://example.org/dir/page.html",
+ "raw": "> Quoted line one.\n> Quoted **two**.\nLine  \nbreak and \"inline quote\" and ~~gone~~.\n* * *\nEnd * star _under_ [brackets] (parens) \\back\\slash # hash\n",
+ "citations": "> Quoted line one.\n> Quoted **two**.\nLine  \nbreak and \"inline quote\" and ~~gone~~.\n* * *\nEnd * star _under_ [brackets] (parens) \\back\\slash # hash\n",
+ "references": "\n\n## References\n\n",
+ "fit": "> Quoted line one.\n> Quoted **two**.\nLinebreak and \"inline quote\" and ~~gone~~.\nEnd * star _under_ [brackets] (parens) \\back\\slash # hash\n",
+ "fit_block_count": 3
+}

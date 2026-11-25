@@ -1,0 +1,8 @@
+{
+ "base_url": "https://example.org/dir/page.html",
+ "raw": "Run this:\n\n```python\ndef f(x):\n    return x * 2   # double\n\n```\n\nOr `Ctrl`+`C`. Inline `a b` joins.\n\n```\nplain   pre\n  block\n```\n\n",
+ "citations": "Run this:\n\n```python\ndef f(x):\n    return x * 2   # double\n\n```\n\nOr `Ctrl`+`C`. Inline `a b` joins.\n\n```\nplain   pre\n  block\n```\n\n",
+ "references": "\n\n## References\n\n",
+ "fit": "Run this:\n\n```python\ndef f(x):\n    return x * 2   # double\n\n```\n\nOr `Ctrl`+`C`. Inline `a b` joins.\n\n```\nplain   pre\n  block\n```\n\n",
+ "fit_block_count": 4
+}

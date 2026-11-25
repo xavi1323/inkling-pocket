@@ -1,0 +1,8 @@
+{
+ "base_url": "https://example.org/dir/page.html",
+ "raw": "![Alt A](https://example.org/img/a.png) and [![linked image](https://x.org/i.jpg)](https://x.org/page)\n<https://same.org> auto link. [frag link](https://example.org/dir/page.html#frag) mail no href\n",
+ "citations": "![Alt A⟨1⟩] and ![linked image](https://x.org/i.jpg)⟨2⟩\n<https://same.org> auto link. frag link⟨3⟩ mail no href\n",
+ "references": "\n\n## References\n\n⟨1⟩ https://example.org/img/a.png: Alt A\n⟨2⟩ https://x.org/page: ![linked image](https://x.org/i.jpg)\n⟨3⟩ https://example.org/dir/page.html#frag: frag link\n",
+ "fit": "and [![linked image](https://x.org/i.jpg)](https://x.org/page)\n<https://same.org> auto link. [frag link](https://example.org/dir/page.html#frag) mail no href\n",
+ "fit_block_count": 2
+}

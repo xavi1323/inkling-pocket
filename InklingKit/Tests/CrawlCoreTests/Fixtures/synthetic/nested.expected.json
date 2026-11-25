@@ -1,0 +1,8 @@
+{
+ "base_url": "https://example.org/dir/page.html",
+ "raw": "Deep nested **text** inside\nPara in div with [link one](https://example.org/x) and [link two](https://example.org/y) words around.\n### Section head\nSection body text that is reasonably long to keep in the filter output for testing purposes.\n",
+ "citations": "Deep nested **text** inside\nPara in div with link one⟨1⟩ and link two⟨2⟩ words around.\n### Section head\nSection body text that is reasonably long to keep in the filter output for testing purposes.\n",
+ "references": "\n\n## References\n\n⟨1⟩ https://example.org/x: link one\n⟨2⟩ https://example.org/y: link two\n",
+ "fit": "Deep nested **text** inside\nPara in div with [link one](https://example.org/x) and [link two](https://example.org/y) words around.\n### Section head\nSection body text that is reasonably long to keep in the filter output for testing purposes.\n",
+ "fit_block_count": 2
+}
