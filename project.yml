@@ -4,6 +4,9 @@ options:
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
+packages:
+  InklingKit:
+    path: InklingKit
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -16,7 +19,23 @@ targets:
     type: application
     platform: iOS
     sources: [App]
-    # packages:  (InklingKit added in Task 1)
+    dependencies:
+      - package: InklingKit
+        product: InklingCore
+      - package: InklingKit
+        product: AgentCore
+      - package: InklingKit
+        product: CrawlCore
+      - package: InklingKit
+        product: OpenUICore
+      - package: InklingKit
+        product: InklingEngine
+      - package: InklingKit
+        product: PocketCrawler
+      - package: InklingKit
+        product: PocketMemory
+      - package: InklingKit
+        product: OpenUIViews
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.inklingpocket.app
