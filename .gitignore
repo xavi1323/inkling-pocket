@@ -1,0 +1,16 @@
+# model files never committed
+*.safetensors
+tokenizer.json
+tiktoken/
+chat_template.jinja
+# build
+.build/
+.swiftpm/
+out/
+*.ipa
+Payload/
+*.xcodeproj
+DerivedData/
+.venv/
+.superpowers/
+.DS_Store
