@@ -22,7 +22,7 @@ public actor SwiftDataChatSearch: ChatSearching, ModelActor {
         let words = KeywordScorer.words(query)
         guard !words.isEmpty else { return [] }
         var hits: [(ChatSnippet, Double)] = []
-        for m in messages where m.role == "user" || m.role == "model" {
+        for m in messages where m.role == "user" || m.role == "assistant" {
             guard let chat = m.chat, chat.id != excludeChat else { continue }
             let score = KeywordScorer.score(query: query, text: m.content)
             if score > 0 { hits.append((ChatSnippet(chatTitle: chat.title, snippet: Self.snippet(m.content, around: words)), score)) }

@@ -41,11 +41,11 @@ targets += [
         .product(name: "MLXFast", package: "mlx-swift"),
     ]),
     .target(name: "PocketCrawler", dependencies: ["CrawlCore"]),
-    .target(name: "PocketMemory", dependencies: ["AgentCore"]),
+    .target(name: "PocketMemory", dependencies: ["AgentCore", "InklingCore"]),
     .target(name: "OpenUIViews", dependencies: ["OpenUICore"]),
     .testTarget(name: "InklingEngineTests", dependencies: ["InklingEngine"], resources: [.copy("Fixtures")]),
     .testTarget(name: "PocketCrawlerTests", dependencies: ["PocketCrawler"]),
-    .testTarget(name: "PocketMemoryTests", dependencies: ["PocketMemory"]),
+    .testTarget(name: "PocketMemoryTests", dependencies: ["PocketMemory", "InklingCore"]),
     .testTarget(name: "OpenUIViewsTests", dependencies: ["OpenUIViews"]),
 ]
 #endif

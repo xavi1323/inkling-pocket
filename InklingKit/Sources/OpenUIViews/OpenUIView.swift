@@ -4,9 +4,9 @@ import OpenUICore
 /// Renders an OpenUI document. Content only — no glass here (Liquid Glass is for controls/navigation).
 public struct OpenUIView: View {
     let document: OpenUIDocument
-    let onAction: (OpenUIAction) -> Void
+    let onAction: @MainActor @Sendable (OpenUIAction) -> Void
 
-    public init(document: OpenUIDocument, onAction: @escaping (OpenUIAction) -> Void) {
+    public init(document: OpenUIDocument, onAction: @escaping @MainActor @Sendable (OpenUIAction) -> Void) {
         self.document = document
         self.onAction = onAction
     }
@@ -20,8 +20,8 @@ public struct OpenUIView: View {
     }
 }
 
-struct OpenUIActionHandler {
-    var perform: (OpenUIAction) -> Void = { _ in }
+struct OpenUIActionHandler: Sendable {
+    var perform: @MainActor @Sendable (OpenUIAction) -> Void = { _ in }
 }
 
 extension EnvironmentValues {
