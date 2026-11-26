@@ -36,8 +36,9 @@ final class SparseMoE {
         return (tanh(g / gateCap) * gateCap * sigmoid(g) * tanh(u / upCap) * upCap).asType(gate.dtype)
     }
 
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, onRoute: ((MLXArray) -> Void)? = nil) -> MLXArray {
         let (indices, weights) = route(x)
+        onRoute?(indices)
         let (b, length, d) = (x.dim(0), x.dim(1), x.dim(2))
         let routes = indices.dim(-1)
         let out: MLXArray

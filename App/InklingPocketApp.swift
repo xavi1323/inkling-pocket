@@ -55,9 +55,7 @@ struct RootView: View {
                     ContentUnavailableView("Chat not found", systemImage: "bubble.left.and.exclamationmark.bubble.right")
                 }
             case .memory: MemoryView()
-            case .benchmark:
-                ContentUnavailableView("Benchmark", systemImage: "speedometer",
-                                       description: Text("Arrives with the engine. It will measure tokens per second, memory and expert routing."))
+            case .benchmark: BenchmarkView()
             case .settings: SettingsView()
             case .diagnostics: SmokeView()
             case nil:

@@ -46,7 +46,8 @@ final class DecoderLayer {
     }
 
     /// `blocks` collects block-boundary inputs for the attention residuals and is appended to in place.
-    func callAsFunction(_ x: MLXArray, blocks: inout [MLXArray], cache: LayerVisitCache?, messages: MLXArray?) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, blocks: inout [MLXArray], cache: LayerVisitCache?, messages: MLXArray?,
+                        onRoute: ((MLXArray) -> Void)? = nil) -> MLXArray {
         let mixed = attentionInput.map { $0(blocks, x) } ?? x.expandedDimensions(axis: -2)
         let attn: MLXArray
         if isSliding && messages == nil {
@@ -69,7 +70,7 @@ final class DecoderLayer {
         }
         var hidden = Ops.pick(mlpInput(blocks, residual), 0)
         if let messages, let controllers { hidden = controllers[3](hidden, Ops.pick(messages, 3)) }
-        hidden = moe(Ops.rmsNorm(hidden, weight: postAttentionNorm, eps: eps).asType(x.dtype))
+        hidden = moe(Ops.rmsNorm(hidden, weight: postAttentionNorm, eps: eps).asType(x.dtype), onRoute: onRoute)
         return (residual + mlpConv(hidden, cache: cache).asType(.float32)).asType(x.dtype)
     }
 }

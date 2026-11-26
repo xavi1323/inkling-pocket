@@ -8,6 +8,11 @@ public final class Inkling2LanguageModel: CausalLM {
     public let config: InklingTextConfig
     let model: TextModel
     let lmHead: QLinear
+    /// When set, every layer visit records its routed experts (slow: reads ids back to the CPU).
+    public var routing: RoutingStats? {
+        get { model.routing }
+        set { model.routing = newValue }
+    }
 
     init(config: InklingTextConfig, loader: WeightLoader) throws {
         guard config.numSharedExperts == 0 else { throw ModelLoadError.unsupported("shared experts") }
