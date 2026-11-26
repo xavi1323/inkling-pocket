@@ -1,5 +1,5 @@
 // Streaming HTML tokenizer modelled on Python's html.parser.HTMLParser (convert_charrefs=False),
-// so the html2text port sees the same event sequence crawl4ai does.
+// so the Markdown writer sees the same event sequence a browser-like parser would.
 
 enum HTMLEvent: Equatable {
     case start(String, [(String, String?)])
@@ -231,18 +231,17 @@ struct HTMLTokenizer {
             switch e {
             case .data(let d): out += d
             case .entity(let name): out += HTMLEntities.html5[name] ?? "&\(name);"
-            case .charRef(let ref): out += charRefString(ref, unifiable: false)
+            case .charRef(let ref): out += charRefString(ref)
             default: break
             }
         }
         return out
     }
 
-    static func charRefString(_ ref: String, unifiable: Bool) -> String {
+    static func charRefString(_ ref: String) -> String {
         let code: UInt32?
         if ref.hasPrefix("x") || ref.hasPrefix("X") { code = UInt32(ref.dropFirst(), radix: 16) } else { code = UInt32(ref) }
         guard let code else { return "" }
-        if unifiable, let u = HTMLEntities.unifiableByCodePoint[code] { return u }
         guard let scalar = Unicode.Scalar(code) else { return "" }
         return String(Character(scalar))
     }
