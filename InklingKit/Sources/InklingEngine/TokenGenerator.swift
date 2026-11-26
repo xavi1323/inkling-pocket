@@ -114,6 +114,44 @@ public final class TokenGenerator {
         return logits!
     }
 
+    /// Tokens of the kept stable prefix, if any.
+    var prefixTokens: [Int32]? { prefixMark?.tokens }
+
+    /// Saves the kept stable prefix's cache state (nothing to save → no file written).
+    func savePrefix(to url: URL, identity: String) throws {
+        guard let prefixMark else { return }
+        var arrays: [String: MLXArray] = [:]
+        var meta = ["identity": identity, "tokens": prefixMark.tokens.map(String.init).joined(separator: ","),
+                    "visits": "\(cache.count)"]
+        for (i, (c, s)) in zip(cache, prefixMark.snapshot).enumerated() {
+            (c as? InklingVisitCache)?.export(s, key: "visit\(i)", arrays: &arrays, meta: &meta)
+        }
+        let partial = url.deletingPathExtension().appendingPathExtension("partial.safetensors")  // MLX needs the extension
+        try save(arrays: arrays, metadata: meta, url: partial)
+        _ = try? FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: partial, to: url)
+    }
+
+    /// Loads a saved stable prefix when it was saved for `identity` and starts `prompt`; returns whether it did.
+    @discardableResult
+    func loadPrefix(from url: URL, identity: String, ifPrefixOf prompt: [Int32]) throws -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return false }
+        let (arrays, meta) = try loadArraysAndMetadata(url: url)
+        guard meta["identity"] == identity, let list = meta["tokens"], meta["visits"] == "\(cache.count)" else { return false }
+        let tokens = list.split(separator: ",").compactMap { Int32($0) }
+        guard !tokens.isEmpty, prompt.count > tokens.count, prompt.starts(with: tokens) else { return false }
+        let fresh = model.makeCache()
+        for (i, c) in fresh.enumerated() {
+            guard let c = c as? InklingVisitCache, c.load(key: "visit\(i)", arrays: arrays, meta: meta) else { return false }
+        }
+        eval(Array(arrays.values))
+        cache = fresh
+        mark = nil
+        let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
+        prefixMark = (tokens, snapshots)
+        return true
+    }
+
     /// Generates up to `maxTokens` (stopping at EOS, the context limit or when `shouldStop()` is true),
     /// calling `onToken` for each token. Returns the tokens (without EOS).
     @discardableResult

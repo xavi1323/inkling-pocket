@@ -127,14 +127,17 @@ extension InklingGenerator {
             SelfTest.compare(reference: reference, fast: fast, sequences: sequences, scored: SelfTest.continuationTokens)
         }
         var answers: [KnownAnswer] = []
-        greedy.maxTokens = 48
+        // Room for a short thought first: at 48 tokens "cat backwards" ran out before answering.
+        greedy.maxTokens = 160
         for (i, item) in SelfTest.knownAnswers.enumerated() {
             progress("Known answer \(i + 1)/\(SelfTest.knownAnswers.count)…")
-            var text = ""
+            var text = "", thought = ""
             for try await event in generate([ChatMessage(role: .user, content: item.prompt)], tools: [], effort: .none, parameters: greedy) {
                 if case .answer(let t) = event { text += t }
+                if case .thinking(let t) = event { thought += t }
             }
-            answers.append(KnownAnswer(prompt: item.prompt, output: text, passed: SelfTest.check(text, expected: item.expected)))
+            let shown = text.isEmpty && !thought.isEmpty ? "(no answer; thought: \(thought.prefix(120)))" : text
+            answers.append(KnownAnswer(prompt: item.prompt, output: shown, passed: SelfTest.check(text, expected: item.expected)))
         }
         return SelfTestReport(comparison: comparison, knownAnswers: answers)
     }

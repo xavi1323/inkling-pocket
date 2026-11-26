@@ -28,6 +28,11 @@ public actor InklingGenerator: LanguageModel {
     /// Gives memory freed by a dropped engine back to iOS (call after releasing the old engine, before loading).
     public static func releaseFreedMemory() { Memory.clearCache() }
     public private(set) var stats = GenerationStats()
+    /// Where the instructions' cache state is kept between launches (nil for test models).
+    var promptCacheURL: URL?
+    private var savedPrefix: [Int32]?
+    private var triedSavedPrefix = false
+    private var promptCacheIdentity: String { "inkling-\(mappedWeightBytes)" }
 
     /// Loads config, tokenizer and memory-mapped weights from an imported model folder.
     public init(modelFolder: URL, path: EnginePath, memoryBudgetGB: Double? = nil) async throws {
@@ -49,6 +54,8 @@ public actor InklingGenerator: LanguageModel {
         let tokenizer = try InklingTokenizer(modelFolder: modelFolder)
         self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes, expertSlots: slots,
                   nonExpertBytes: nonExpert)
+        promptCacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appending(path: "inkling-prompt-cache.safetensors")
     }
 
     /// Slots per layer within `budget` bytes, in proportion to how often each layer is visited per token (the loop
@@ -137,6 +144,13 @@ public actor InklingGenerator: LanguageModel {
         guard prompt.count < generator.contextLimit else {
             throw GenerationError.contextFull(prompt: prompt.count, limit: generator.contextLimit)
         }
+        // First turn after launch: start from the instructions' saved cache state when it matches.
+        if let url = promptCacheURL, !triedSavedPrefix, generator.prefixTokens == nil {
+            triedSavedPrefix = true
+            if (try? withError { try generator.loadPrefix(from: url, identity: promptCacheIdentity, ifPrefixOf: prompt) }) == true {
+                savedPrefix = generator.prefixTokens
+            }
+        }
         // MLX errors become a thrown error (shown in the chat) instead of crashing the app.
         let generator = self.generator, tokenizer = self.tokenizer
         let ended = try withError { () -> Bool in
@@ -157,5 +171,9 @@ public actor InklingGenerator: LanguageModel {
         }
         stats = generator.stats
         if !Task.isCancelled, !ended { out.yield(.end) }
+        // New instructions state (first launch, or the date or memory changed): keep it for the next launch.
+        if let url = promptCacheURL, let tokens = generator.prefixTokens, tokens != savedPrefix {
+            if (try? withError { try generator.savePrefix(to: url, identity: promptCacheIdentity) }) != nil { savedPrefix = tokens }
+        }
     }
 }

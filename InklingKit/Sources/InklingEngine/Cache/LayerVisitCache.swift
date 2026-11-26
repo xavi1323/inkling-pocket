@@ -43,6 +43,24 @@ public final class InklingVisitCache: LayerVisitCache {
         convState = s.conv
     }
 
+    /// Writes the state `s` stands for into `arrays`/`meta` under `key`.
+    func export(_ s: VisitSnapshot, key: String, arrays: inout [String: MLXArray], meta: inout [String: String]) {
+        let kv = self.kv.export(s.kv)
+        if let k = kv.keys, let v = kv.values { arrays[key + ".k"] = k; arrays[key + ".v"] = v }
+        for (i, c) in s.conv.slots.enumerated() { if let c { arrays[key + ".c\(i)"] = c } }
+        meta[key] = "\(kv.offset),\(kv.index)"
+    }
+
+    /// Loads what `export` wrote; false when it is missing.
+    func load(key: String, arrays: [String: MLXArray], meta: [String: String]) -> Bool {
+        guard let m = meta[key]?.split(separator: ",").compactMap({ Int($0) }), m.count == 2 else { return false }
+        kv.load(KVSnapshot(keys: arrays[key + ".k"], values: arrays[key + ".v"], offset: m[0], index: m[1]))
+        var state = ConvStateCache()
+        for i in 0..<state.slots.count { state.slots[i] = arrays[key + ".c\(i)"] }
+        convState = state
+        return true
+    }
+
     /// Bytes held by K/V buffers (for the Benchmark screen).
     public var bytes: Int { kv.bytes }
 }
@@ -53,6 +71,10 @@ protocol KVStore: AnyObject {
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
     func snapshot() -> KVSnapshot
     func restore(_ s: KVSnapshot)
+    /// The K/V a snapshot stands for, as standalone arrays (for saving to disk).
+    func export(_ s: KVSnapshot) -> KVSnapshot
+    /// Replaces the contents with exported K/V.
+    func load(_ s: KVSnapshot)
 }
 
 /// Rotating caches keep their (small) buffers; growing caches only remember the offset, because tokens before it are

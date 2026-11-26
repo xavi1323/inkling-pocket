@@ -137,3 +137,31 @@ import InklingCore
         #expect(gen.stats.prefilledTokens == 4)
     }
 }
+
+/// The instructions' cache state survives an app restart: saved to disk, loaded into a new engine.
+@Suite(.serialized) struct PromptCacheFileTests {
+    init() { Device.setDefault(device: .cpu) }
+
+    @Test func savedPrefixIsReusedByANewEngine() throws {
+        let prefix = (0..<300).map { Int32(($0 * 13 + 5) % 500) }  // longer than a ring buffer step
+        let a = prefix + [7, 8, 9, 10], b = prefix + [11, 12, 13]
+        let url = try tempDir().appending(path: "prompt-cache.safetensors")
+        let first = TokenGenerator(model: try Tiny.model(), eos: [])
+        first.prefillChunk = 64
+        first.prefill(a, stablePrefix: prefix.count)
+        try first.savePrefix(to: url, identity: "tiny")
+
+        let second = TokenGenerator(model: try Tiny.model(), eos: [])
+        second.prefillChunk = 64
+        #expect(try second.loadPrefix(from: url, identity: "other", ifPrefixOf: b) == false)
+        #expect(try second.loadPrefix(from: url, identity: "tiny", ifPrefixOf: [1, 2, 3]) == false)
+        #expect(try second.loadPrefix(from: url, identity: "tiny", ifPrefixOf: b) == true)
+        let reused = second.prefill(b, stablePrefix: prefix.count)
+        #expect(second.stats.prefilledTokens == b.count - prefix.count)
+
+        let fresh = TokenGenerator(model: try Tiny.model(), eos: [])
+        fresh.prefillChunk = 64
+        let expected = fresh.prefill(b, stablePrefix: prefix.count)
+        #expect(abs(reused - expected).max().item(Float.self) == 0)
+    }
+}

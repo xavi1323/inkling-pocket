@@ -89,4 +89,7 @@ final class RotatingKVCache: KVStore {
         offset = s.offset
         index = s.index
     }
+
+    func export(_ s: KVSnapshot) -> KVSnapshot { s }
+    func load(_ s: KVSnapshot) { restore(s) }
 }

@@ -32,4 +32,16 @@ final class KVCache: KVStore {
 
     func snapshot() -> KVSnapshot { KVSnapshot(offset: offset, index: offset) }
     func restore(_ s: KVSnapshot) { offset = s.offset }
+
+    func export(_ s: KVSnapshot) -> KVSnapshot {
+        guard let keys, let values, s.offset > 0 else { return KVSnapshot(offset: 0, index: 0) }
+        return KVSnapshot(keys: keys[0..., 0..., ..<s.offset, 0...], values: values[0..., 0..., ..<s.offset, 0...],
+                          offset: s.offset, index: s.offset)
+    }
+
+    func load(_ s: KVSnapshot) {
+        keys = s.keys
+        values = s.values
+        offset = s.keys == nil ? 0 : s.offset
+    }
 }
