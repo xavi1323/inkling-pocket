@@ -4,7 +4,8 @@ import InklingCore
 import AgentCore
 
 public enum EnginePath: String, Sendable, CaseIterable {
-    /// Fast path with routing on the GPU and no waits inside a token (`TurboPath`); near-exact.
+    /// Turbo (`TurboPath`: routing on the GPU, no waits inside a token) guesses tokens ahead and the exact path
+    /// checks them, so the output is exact.
     case turbo
     /// Custom Metal kernels; exact.
     case fast
@@ -87,6 +88,8 @@ public actor InklingGenerator: LanguageModel {
         if path == .turbo, let lm = model as? Inkling2LanguageModel {
             generator = TokenGenerator(model: TurboPath(lm), eos: [tokenizer.eosID])
             generator.pipelined = lm.expertCaches.isEmpty  // the table changes between tokens
+            // Streaming: turbo only guesses ahead; every token is checked exact (multi-token passes run exact).
+            if !lm.expertCaches.isEmpty { generator.draft = TurboPath(lm, redo: false) }
         } else if path == .fast, let lm = model as? Inkling2LanguageModel {
             generator = TokenGenerator(model: FastPath(lm), eos: [tokenizer.eosID])
             // Streaming reads routing back every layer, so there is nothing to overlap.

@@ -110,7 +110,9 @@ public enum SelfTest {
 extension InklingGenerator {
     /// Runs the self-test on the loaded model: path comparison on 3 prompts × 64 tokens, then the known answers.
     public func selfTest(progress: @escaping @Sendable (String) -> Void = { _ in }) async throws -> SelfTestReport {
-        let (reference, fast) = paths()
+        var (reference, fast) = paths()
+        // With speculative decoding turbo only drafts; the tokens come from exact checks.
+        if generator.draft != nil, let lm = reference as? Inkling2LanguageModel { fast = FastPath(lm) }
         var sequences: [[Int32]] = []
         var greedy = GenerateParameters()
         greedy.temperature = 0

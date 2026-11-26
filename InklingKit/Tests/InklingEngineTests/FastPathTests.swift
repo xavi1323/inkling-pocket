@@ -259,3 +259,80 @@ extension FastPathTests {
         }
     }
 }
+
+/// Speculative decoding: a draft guesses ahead, the exact model checks every guess in one pass, and only tokens the
+/// exact model would have produced are kept. The output is the exact path's whatever the draft guesses.
+extension FastPathTests {
+    /// Drafts the token after the one the model would pick: every guess is wrong, so every check rewinds.
+    final class WrongDraft: CausalLM {
+        let inner: CausalLM
+        init(_ inner: CausalLM) { self.inner = inner }
+        func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
+            let logits = inner(tokens, cache: cache)
+            return concatenated([logits[.ellipsis, (logits.dim(-1) - 1)...], logits[.ellipsis, ..<(logits.dim(-1) - 1)]], axis: -1)
+        }
+        func makeCache() -> [LayerVisitCache] { inner.makeCache() }
+    }
+
+    func speculative(_ draft: (Inkling2LanguageModel) -> CausalLM, slots: Int?, prompt: [Int32], tokens: Int,
+                     check: (TokenGenerator) -> Void = { _ in }) throws -> [Int32] {
+        let model = try slots.map { try ExpertStreamingTests.streamed(slots: $0) } ?? Tiny.model()
+        let gen = TokenGenerator(model: FastPath(model), eos: [])
+        gen.draft = draft(model)
+        let out = gen.generate(prompt: prompt, sampler: Sampler(greedy()), maxTokens: tokens, shouldStop: { false }, onToken: { _ in })
+        check(gen)
+        return out
+    }
+
+    /// The reference path: on the CPU its single-token steps match a whole-sequence pass, which the fused fast
+    /// steps do not (see `fastPathLogitsMatchReference`); a check is a multi-token pass.
+    func exact(slots: Int?, prompt: [Int32], tokens: Int) throws -> [Int32] {
+        let model = try slots.map { try ExpertStreamingTests.streamed(slots: $0) } ?? Tiny.model()
+        return TokenGenerator(model: model, eos: [])
+            .generate(prompt: prompt, sampler: Sampler(greedy()), maxTokens: tokens, shouldStop: { false }, onToken: { _ in })
+    }
+
+    // 40 prompt tokens: past the tiny model's 8-token sliding window, so checks rewind a wrapped ring.
+    var specPrompt: [Int32] { (0..<40).map { Int32(($0 * 37 + 11) % 500) } }
+
+    @Test func speculativeWithPerfectDraftMatchesExactAndKeepsDrafts() throws {
+        let want = try exact(slots: nil, prompt: specPrompt, tokens: 24)
+        let got = try speculative({ $0 }, slots: nil, prompt: specPrompt, tokens: 24) { gen in
+            #expect(gen.stats.draftedTokens > 0)
+            #expect(gen.stats.acceptedTokens == gen.stats.draftedTokens)
+        }
+        #expect(got == want)
+    }
+
+    @Test func speculativeWithWrongDraftMatchesExact() throws {
+        let want = try exact(slots: nil, prompt: specPrompt, tokens: 24)
+        let got = try speculative({ WrongDraft(FastPath($0)) }, slots: nil, prompt: specPrompt, tokens: 24) { gen in
+            #expect(gen.stats.draftedTokens > 0)
+        }
+        #expect(got == want)
+    }
+
+    @Test func speculativeTurboDraftMatchesExactWithFewSlots() throws {
+        let want = try exact(slots: 3, prompt: specPrompt, tokens: 24)
+        let got = try speculative({ TurboPath($0, redo: false) }, slots: 3, prompt: specPrompt, tokens: 24) { gen in
+            #expect(gen.stats.draftedTokens > 0)
+        }
+        #expect(got == want)
+    }
+
+    /// Stops exactly at `maxTokens` even when a check accepts more.
+    @Test func speculativeStopsAtMaxTokens() throws {
+        for n in [1, 2, 5] {
+            let got = try speculative({ $0 }, slots: nil, prompt: specPrompt, tokens: n)
+            #expect(got == (try exact(slots: nil, prompt: specPrompt, tokens: n)))
+        }
+    }
+
+    /// Text the model copies from the prompt is drafted by looking it up, with no draft model run.
+    @Test func promptLookupDraftsRepeatedText() {
+        let context: [Int32] = [5, 6, 7, 8, 9, 1, 2, 5, 6, 7]
+        #expect(TokenGenerator.lookupDraft(context, max: 3) == [8, 9, 1])
+        #expect(TokenGenerator.lookupDraft(context, max: 10) == [8, 9, 1, 2, 5, 6, 7])
+        #expect(TokenGenerator.lookupDraft([1, 2, 3, 4], max: 4) == [])
+    }
+}

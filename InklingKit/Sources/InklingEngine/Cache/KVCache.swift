@@ -37,6 +37,7 @@ final class KVCache: KVStore {
 
     func snapshot() -> KVSnapshot { KVSnapshot(offset: offset, index: offset) }
     func rewindOne() { offset -= 1 }
+    func rewind(_ n: Int) { offset -= n }
     func restore(_ s: KVSnapshot) { offset = s.offset }
 
     func export(_ s: KVSnapshot) -> KVSnapshot {

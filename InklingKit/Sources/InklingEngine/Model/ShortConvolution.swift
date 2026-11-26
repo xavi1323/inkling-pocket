@@ -56,8 +56,15 @@ struct DynamicShortConvolution {
 }
 
 /// (`[state; inputs]` along time, its last `kernel - 1` rows: the next state). A nil state is zeros.
+/// Under `ConvContext.keepAll` the whole context is kept as the state, so a speculative check can later keep the
+/// state after any of its tokens (`InklingVisitCache.keep(_:of:)`).
 func convContext(_ inputs: MLXArray, kernel k: Int, state: MLXArray?) -> (MLXArray, MLXArray) {
     let state = state ?? MLXArray.zeros([inputs.dim(0), k - 1, inputs.dim(-1)], dtype: .float32)
     let context = concatenated([state, inputs], axis: 1)
-    return (context, context[0..., (context.dim(1) - (k - 1))..., 0...])
+    return (context, ConvContext.keepAll ? context : context[0..., (context.dim(1) - (k - 1))..., 0...])
+}
+
+enum ConvContext {
+    /// Set around a multi-token speculative check (never around single-token steps, which may be compiled).
+    @TaskLocal static var keepAll = false
 }

@@ -94,6 +94,18 @@ public final class InklingVisitCache: LayerVisitCache {
     /// Whether the step after `p` can be undone (exactly one token written since).
     func canRewind(to p: Checkpoint) -> Bool { kv.offset == p.offset + 1 }
 
+    /// After a multi-token call under `ConvContext.keepAll` that wrote `written` tokens: keeps the first `kept` of
+    /// them (K/V and conv state as if only those had been fed).
+    func keep(_ kept: Int, of written: Int) {
+        precondition(kept >= 1 && kept <= written)
+        kv.rewind(written - kept)
+        for (i, slot) in convState.slots.enumerated() {
+            guard let slot else { continue }
+            let width = slot.dim(1) - written  // kernel - 1
+            convState.slots[i] = slot[0..., kept..<(kept + width), 0...]
+        }
+    }
+
     /// Undoes the single-token step after `p`; false (nothing changed) when it is not exactly one step back.
     @discardableResult
     func rewind(to p: Checkpoint) -> Bool {
@@ -113,6 +125,8 @@ protocol KVStore: AnyObject {
     func restore(_ s: KVSnapshot)
     /// Forgets the last single-token write (the next write goes where it went).
     func rewindOne()
+    /// Forgets the last `n` tokens of a multi-token write (`update` with more than one token).
+    func rewind(_ n: Int)
     /// The K/V a snapshot stands for, as standalone arrays (for saving to disk).
     func export(_ s: KVSnapshot) -> KVSnapshot
     /// Replaces the contents with exported K/V.

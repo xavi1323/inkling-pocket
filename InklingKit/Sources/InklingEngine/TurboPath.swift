@@ -5,7 +5,12 @@ import MLX
 /// next ones. Not bit-exact with `.fast`; the self-test measures how close it is. Prompt chunks run exact.
 public final class TurboPath: CausalLM {
     public let base: Inkling2LanguageModel
-    public init(_ base: Inkling2LanguageModel) { self.base = base }
+    /// Redo a token exact when it swapped too much (off when drafting for a speculative check, which is exact anyway).
+    public let redo: Bool
+    public init(_ base: Inkling2LanguageModel, redo: Bool = true) {
+        self.base = base
+        self.redo = redo
+    }
 
     public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
         run(tokens, cache: cache, lastOnly: false)
@@ -29,7 +34,7 @@ public final class TurboPath: CausalLM {
         let visits = cache?.compactMap { $0 as? InklingVisitCache } ?? []
         let points = visits.map { $0.checkpoint() }
         let out = base(tokens, cache: cache, fast: true, compiled: true, lastOnly: lastOnly)
-        guard let missed = base.turboMissed() else { return out }
+        guard redo, let missed = base.turboMissed() else { return out }
         eval(out, missed)
         let m = missed.asArray(Float.self)
         let rewindable = visits.count == cache?.count && zip(visits, points).allSatisfy { $0.canRewind(to: $1) }

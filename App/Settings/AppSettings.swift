@@ -7,7 +7,7 @@ extension EnginePath: Identifiable {
     public var id: String { rawValue }
     var title: String {
         switch self {
-        case .turbo: "Turbo (fastest, near-exact)"
+        case .turbo: "Turbo (fastest, exact)"
         case .fast: "Fast (custom Metal, exact)"
         case .reference: "Reference (plain MLX)"
         }

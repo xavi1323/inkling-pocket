@@ -34,6 +34,8 @@ public struct BenchmarkReport: Sendable, Equatable {
     /// Decode speed with no routing waits or expert reads (streaming only).
     public var ceiling = ""
     public var turboSwaps = ""
+    /// Speculative decoding: share of guessed tokens kept, tokens per check.
+    public var speculation = ""
     /// Expert read speed from storage, by read style.
     public var storage = ""
     public init() {}
@@ -57,6 +59,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Decode time per token: \(decodeProfile.isEmpty ? "n/a" : decodeProfile)",
             "Read-ahead used, by guess rank: \(guessRanks.isEmpty ? "n/a" : guessRanks)",
             "Turbo swaps: \(turboSwaps.isEmpty ? "n/a (not turbo)" : turboSwaps)",
+            "Guess ahead: \(speculation.isEmpty ? "n/a" : speculation)",
             "Decode ceiling (no routing waits or reads): \(ceiling.isEmpty ? "n/a" : ceiling)",
             "Storage reads: \(storage.isEmpty ? "n/a" : storage)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
@@ -153,6 +156,7 @@ extension InklingGenerator {
         progress("Prefill \(tokens.count) tokens, decode \(decodeTokens)…")
         let gen = TokenGenerator(model: model, eos: [])
         gen.pipelined = generator.pipelined
+        gen.draft = generator.draft
         let profile = (reference as? Inkling2LanguageModel)?.profile
         let before = profile?.snapshot
         let lmBefore = (reference as? Inkling2LanguageModel).map { ($0.turboSkipped, $0.turboPicks, $0.turboRedone) }
@@ -182,6 +186,12 @@ extension InklingGenerator {
             report.turboSwaps = String(format: "%.1f%% of expert picks ran a ready expert instead (%.1f per token), %.0f%% of tokens redone exact",
                                        Double(skipped) / Double(picks) * 100, Double(skipped) / steps,
                                        Double(lm.turboRedone - r0) / steps * 100)
+        }
+        if gen.stats.checks > 0 {
+            let st = gen.stats
+            report.speculation = String(format: "%.0f%% of guessed tokens kept, %.1f tokens per exact check (%d checks)",
+                                        Double(st.acceptedTokens) / Double(max(st.draftedTokens, 1)) * 100,
+                                        Double(st.acceptedTokens + st.checks) / Double(st.checks), st.checks)
         }
         if let profile, let before, let afterPrefill {
             let prefillSeconds = gen.stats.prefillTokensPerSecond > 0 ? Double(gen.stats.prefilledTokens) / gen.stats.prefillTokensPerSecond : 0

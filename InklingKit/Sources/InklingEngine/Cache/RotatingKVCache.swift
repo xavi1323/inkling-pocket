@@ -96,6 +96,17 @@ final class RotatingKVCache: KVStore {
         index -= 1
     }
 
+    /// After `updateConcat` the buffer is in temporal order with `index` at its end: drop the newest `n`. At least
+    /// `maxSize - 1` older entries stay, so the next token still sees a full window.
+    func rewind(_ n: Int) {
+        guard n > 0, let k = keys, let v = values else { return }
+        precondition(index == k.dim(2) && n < index, "rewind(_:) follows a multi-token update")
+        keys = k[0..., 0..., ..<(index - n), 0...]
+        values = v[0..., 0..., ..<(index - n), 0...]
+        index -= n
+        offset -= n
+    }
+
     func restore(_ s: KVSnapshot) {
         keys = s.keys
         values = s.values
