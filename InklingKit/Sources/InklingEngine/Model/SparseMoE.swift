@@ -5,6 +5,8 @@ import InklingCore
 /// Sigmoid-routed top-k experts with a softcapped SwiGLU; route weights are renormalised and scaled.
 final class SparseMoE {
     let gateWeight: MLXArray  // [E, D]
+    /// `gateWeight` in FP32, converted once at load (not on every visit; slotstream measured ~2% for this).
+    let gateFP32: MLXArray
     let scoreBias: MLXArray   // [E]
     let gateProj, upProj, downProj: QSwitchLinear
     /// Streaming slots; when set the projections above read the slots, indexed by slot instead of expert.
@@ -17,6 +19,8 @@ final class SparseMoE {
     init(_ config: InklingTextConfig, layer: Int, path: String, loader: WeightLoader) throws {
         gateWeight = try loader.tensor(path + ".gate_weight")
         scoreBias = try loader.tensor(path + ".e_score_correction_bias")
+        gateFP32 = gateWeight.asType(.float32)
+        eval(gateFP32)
         if let plan = loader.expertSlots, layer < plan.count, let mapped = loader.source as? MappedSafetensors {
             let slots = plan[layer]
             let cache = try ExpertCache(path: path, weights: mapped, quant: loader.quant, prefix: loader.prefix,
@@ -37,7 +41,7 @@ final class SparseMoE {
 
     /// Expert ids [B,L,k] and their weights [B,L,k] (FP32).
     func route(_ x: MLXArray) -> (MLXArray, MLXArray) {
-        let scores = sigmoid(matmul(x.asType(.float32), gateWeight.asType(.float32).T))
+        let scores = sigmoid(matmul(x.asType(.float32), gateFP32.T))
         let indices = argPartition(-(scores + scoreBias), kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         var weights = takeAlong(scores, indices, axis: -1)
         weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20) * routeScale
@@ -50,7 +54,7 @@ final class SparseMoE {
     /// renormalised as usual. Swapping only lower-ranked experts barely changes a fine-grained MoE's output, and the
     /// cache keeps the experts it reuses, so far fewer are read from storage.
     func smartRoute(_ x: MLXArray, resident: MLXArray, keepTop: Int, pickFrom: Int) -> (MLXArray, MLXArray) {
-        let scores = sigmoid(matmul(x.asType(.float32), gateWeight.asType(.float32).T))
+        let scores = sigmoid(matmul(x.asType(.float32), gateFP32.T))
         let order = argSort(-(scores + scoreBias), axis: -1)
         let rank = argSort(order, axis: -1).asType(.float32)  // each expert's rank, 0 = best
         let pool = Float(pickFrom)
@@ -59,6 +63,23 @@ final class SparseMoE {
         var weights = takeAlong(scores, indices, axis: -1)
         weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20) * routeScale
         return (indices, weights)
+    }
+
+    /// `smartRoute` compiled (a few fused kernels instead of a dozen); one per `keepTop`. GPU only.
+    private var compiledSmart: (keepTop: Int, fn: ([MLXArray]) -> [MLXArray])?
+
+    /// The smart router for this step: compiled on the fast path.
+    func smartRoute(_ x: MLXArray, resident: MLXArray, fast: Bool) -> (MLXArray, MLXArray) {
+        guard fast, Ops.useFused else { return smartRoute(x, resident: resident, keepTop: smartKeepTop, pickFrom: Self.smartPickFrom) }
+        if compiledSmart?.keepTop != smartKeepTop {
+            let keep = smartKeepTop
+            compiledSmart = (keep, compile(inputs: [], outputs: []) { [unowned self] a in
+                let (i, w) = smartRoute(a[0], resident: a[1], keepTop: keep, pickFrom: Self.smartPickFrom)
+                return [i, w]
+            })
+        }
+        let r = compiledSmart!.fn([x, resident])
+        return (r[0], r[1])
     }
 
     /// Smart picks on (decode steps and speculative checks only; prompt chunks stay exact).
@@ -75,7 +96,7 @@ final class SparseMoE {
 
     /// This router's top-k experts for `x`, best first (a guess at a later visit's routing).
     func rankedGuess(_ x: MLXArray) -> MLXArray {
-        let scores = sigmoid(matmul(x.asType(.float32), gateWeight.asType(.float32).T)) + scoreBias
+        let scores = sigmoid(matmul(x.asType(.float32), gateFP32.T)) + scoreBias
         return argSort(-scores, axis: -1)[.ellipsis, ..<topK]
     }
 
@@ -95,7 +116,7 @@ final class SparseMoE {
     /// part of the wanted experts' routing weight that was not ready.
     func turboRoute(_ a: [MLXArray]) -> [MLXArray] {
         let (x, slots, ready) = (a[0], a[1], a[2])
-        let scores = sigmoid(matmul(x.asType(.float32), gateWeight.asType(.float32).T))
+        let scores = sigmoid(matmul(x.asType(.float32), gateFP32.T))
         let selection = scores + scoreBias
         let wanted = argPartition(-selection, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         let used = argPartition(-(selection + (ready - 1) * 1e9), kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
@@ -136,8 +157,7 @@ final class SparseMoE {
             return experts(x, r[2], r[3], fast: fast)
         }
         let smart = smartRouting && cache != nil && !ignoreRouting && x.dim(0) * x.dim(1) <= Self.smartMaxTokens
-        let (indices, weights) = smart ? smartRoute(x, resident: cache!.residentMask(), keepTop: smartKeepTop, pickFrom: Self.smartPickFrom)
-                                       : route(x, fast: fast)
+        let (indices, weights) = smart ? smartRoute(x, resident: cache!.residentMask(), fast: fast) : route(x, fast: fast)
         onRoute?(indices)
         guard let cache else { return experts(x, indices, weights, fast: fast) }
         let (b, length, d) = (x.dim(0), x.dim(1), x.dim(2))
@@ -146,14 +166,20 @@ final class SparseMoE {
             asyncEval(out)
             return out
         }
-        // Single token: guess the next visit's experts from this input (its router on our input) and read them in
-        // while the GPU works. Safe: everything queued before reading the routing back has finished, and the work
-        // queued after it only reads this layer's slots.
-        let guess = b * length == 1 && next?.cache != nil ? (fast && Ops.useFused ? next!.compiledGuess(x) : next!.rankedGuess(x)) : nil
+        // Single tokens and speculative checks: guess the next visit's experts from this input (its router on our
+        // input) and read them in while the GPU works. Safe: everything queued before reading the routing back has
+        // finished, and the work queued after it only reads this layer's slots.
+        let rows = b * length
+        let guess = rows <= Self.smartMaxTokens && next?.cache != nil
+            ? (fast && Ops.useFused ? next!.compiledGuess(x) : next!.rankedGuess(x)) : nil
         let waited = [indices] + (guess.map { [$0] } ?? [])
         if let profile = cache.profile { profile.time(\.gpuWait) { eval(waited) } } else { eval(waited) }
         let ids = indices.asArray(Int32.self)
-        if let guess, let nextCache = next?.cache { nextCache.prefetch(guess.asArray(Int32.self).map(Int.init)) }
+        if let guess, let nextCache = next?.cache {
+            let (experts, ranks) = Self.rankMajor(guess.asArray(Int32.self).map(Int.init), rows: rows, k: topK,
+                                                  depth: rows == 1 ? topK : Self.checkGuessDepth)
+            nextCache.prefetch(experts, ranks: ranks)
+        }
         var unique: [Int] = []
         var seen = Set<Int>()
         for id in ids where seen.insert(Int(id)).inserted { unique.append(Int(id)) }
@@ -204,7 +230,26 @@ final class SparseMoE {
             missing.removeFirst(group.count)
             run(group)
         }
+        // The GPU still runs the last batches and storage is idle: start reading the next visit's missing experts
+        // (a chunk needs nearly all of them). Its slots are free: its earlier visits finished before our routing.
+        if let nextCache = next?.cache, nextCache !== cache { nextCache.readAheadMissing(nextCache.slots / 2) }
         return total.reshaped([b, length, d]).asType(x.dtype)
+    }
+
+    /// How many of each token's best guesses a multi-token check reads ahead (smart picks always run the top 3).
+    static let checkGuessDepth = 4
+
+    /// Row-major guesses [rows × k] (best first per row) → distinct experts ordered by rank across rows, each with the
+    /// best rank any row gave it; ranks below `depth` only.
+    static func rankMajor(_ guess: [Int], rows: Int, k: Int, depth: Int) -> ([Int], [Int]) {
+        var experts: [Int] = [], ranks: [Int] = [], seen = Set<Int>()
+        for r in 0..<min(depth, k) {
+            for row in 0..<rows where seen.insert(guess[row * k + r]).inserted {
+                experts.append(guess[row * k + r])
+                ranks.append(r)
+            }
+        }
+        return (experts, ranks)
     }
 
     /// Routed experts' weighted sum; `indices` address `gateProj`/`upProj`/`downProj` (experts, or slots when streaming).

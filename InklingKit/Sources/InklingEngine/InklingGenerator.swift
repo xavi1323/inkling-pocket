@@ -43,6 +43,8 @@ public actor InklingGenerator: LanguageModel {
     /// Loads config, tokenizer and memory-mapped weights from an imported model folder.
     public init(modelFolder: URL, path: EnginePath, memoryBudgetGB: Double? = nil) async throws {
         let manifest = try ModelFolder.validate(modelFolder)
+        // The tokenizer (200k ranks to parse) loads on another core while the weights are mapped and slots made.
+        let tokenizerTask = Task.detached(priority: .userInitiated) { try InklingTokenizer(modelFolder: modelFolder) }
         // Freed MLX buffers are kept for reuse up to this size; the default (most of RAM) is far too much here.
         Memory.cacheLimit = Self.mlxCacheLimit
         let weights = try MappedSafetensors(manifest: manifest)
@@ -54,20 +56,73 @@ public actor InklingGenerator: LanguageModel {
         }
         let nonExpert = weights.mappedBytes - perLayer.reduce(0, +) * Int64(text.numExperts)
         let visits = (0..<text.numHiddenLayers).map { layer in text.layerVisits.filter { $0 == layer }.count }
-        let slots = Self.slotPlan(budget: MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert - Self.workingReserve,
-                                  perLayer: perLayer, visits: visits, experts: text.numExperts, topK: text.expertsPerToken)
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let heatURL = caches?.appending(path: "inkling-expert-heat.json")
+        let identity = "inkling-\(weights.mappedBytes)"
+        let heat = heatURL.flatMap { try? Data(contentsOf: $0) }
+            .flatMap { try? JSONDecoder().decode(Inkling2LanguageModel.HeatFile.self, from: $0) }
+            .flatMap { $0.identity == identity ? $0 : nil }
+        let budget = MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert - Self.workingReserve
+        let slots = heat.flatMap { Self.heatPlan(budget: budget, perLayer: perLayer, heat: $0.layers, experts: text.numExperts,
+                                                 topK: text.expertsPerToken) }
+            ?? Self.slotPlan(budget: budget, perLayer: perLayer, visits: visits, experts: text.numExperts, topK: text.expertsPerToken)
         let model = try Inkling2LanguageModel.load(config: config, weights: weights, slotPlan: slots)
-        let tokenizer = try InklingTokenizer(modelFolder: modelFolder)
+        let tokenizer = try await tokenizerTask.value
         self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes, expertSlots: slots,
                   nonExpertBytes: nonExpert)
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
         promptCacheURL = caches?.appending(path: "inkling-prompt-cache.safetensors")
-        heatURL = caches?.appending(path: "inkling-expert-heat.json")
+        self.heatURL = heatURL
         // Start with last session's most-used experts in their slots instead of empty ones.
-        if let heatURL, let data = try? Data(contentsOf: heatURL),
-           let file = try? JSONDecoder().decode(Inkling2LanguageModel.HeatFile.self, from: data) {
-            model.warm(from: file, identity: promptCacheIdentity)
+        if let heat { model.warm(from: heat, identity: identity) }
+        // Build the Metal kernels and compiled graphs now, while the user types, not on the first reply.
+        Task(priority: .utility) { [weak self] in await self?.warmUp() }
+    }
+
+    /// Whether `warmUp` ran.
+    public private(set) var warmedUp = false
+
+    /// Runs a few tokens through every path chat uses (prompt chunk, guesses, checks, plain steps, sampling) on a
+    /// scratch cache, so their kernels are compiled before the first reply. Chat state is not touched.
+    public func warmUp() {
+        guard !warmedUp else { return }
+        warmedUp = true
+        let scratch = TokenGenerator(model: generator.model, eos: [])
+        scratch.draft = generator.draft
+        scratch.exactStep = generator.exactStep
+        scratch.pipelined = generator.pipelined
+        let lm = paths().reference as? Inkling2LanguageModel
+        lm?.smartRouting = smartRouting
+        let prompt = tokenizer.encode("Hello! Say hi back in one short sentence.")
+        guard !prompt.isEmpty else { return }
+        _ = try? withError {
+            scratch.generate(prompt: prompt, sampler: Sampler(GenerateParameters()), maxTokens: 6, shouldStop: { false },
+                             onToken: { _ in })
         }
+    }
+
+    /// Slots per layer from last session's expert use counts: each slot goes where it saves the most reads (the
+    /// layer whose next most-used expert is used most, per byte), so layers that spread their routing get more
+    /// slots and layers that keep using a few experts fewer. Every layer keeps at least `topK`. Nil when the counts
+    /// do not fit the model.
+    static func heatPlan(budget: Int64, perLayer: [Int64], heat: [[Int]], experts: Int, topK: Int) -> [Int]? {
+        guard heat.count == perLayer.count, heat.allSatisfy({ $0.count == experts }),
+              heat.contains(where: { $0.contains { $0 > 0 } }) else { return nil }
+        let sorted = heat.map { $0.sorted(by: >) }
+        var plan = Array(repeating: topK, count: perLayer.count)
+        var used = zip(plan, perLayer).map { Int64($0) * $1 }.reduce(0, +)
+        guard used <= budget else { return nil }
+        // Gain of one more slot in layer l: uses of its next expert per byte (+1 so unseen experts still count).
+        func gain(_ l: Int) -> Double { plan[l] < experts ? Double(sorted[l][plan[l]] + 1) / Double(max(perLayer[l], 1)) : -1 }
+        var queue = (0..<perLayer.count).map { (gain($0), $0) }
+        while true {
+            guard let best = queue.indices.max(by: { queue[$0].0 < queue[$1].0 }), queue[best].0 >= 0 else { break }
+            let l = queue[best].1
+            guard used + perLayer[l] <= budget else { queue[best].0 = -1; continue }
+            plan[l] += 1
+            used += perLayer[l]
+            queue[best].0 = gain(l)
+        }
+        return plan
     }
 
     /// Slots per layer within `budget` bytes, in proportion to how often each layer is visited per token (the loop
@@ -97,7 +152,10 @@ public actor InklingGenerator: LanguageModel {
             generator = TokenGenerator(model: TurboPath(lm), eos: [tokenizer.eosID])
             generator.pipelined = lm.expertCaches.isEmpty  // the table changes between tokens
             // Streaming: turbo only guesses ahead; every token is checked exact (multi-token passes run exact).
-            if !lm.expertCaches.isEmpty { generator.draft = TurboPath(lm, redo: false) }
+            if !lm.expertCaches.isEmpty {
+                generator.draft = TurboPath(lm, redo: false)
+                generator.exactStep = FastPath(lm)
+            }
         } else if path == .fast, let lm = model as? Inkling2LanguageModel {
             generator = TokenGenerator(model: FastPath(lm), eos: [tokenizer.eosID])
             // Streaming reads routing back every layer, so there is nothing to overlap.
@@ -107,11 +165,14 @@ public actor InklingGenerator: LanguageModel {
         }
         // A prompt chunk needs nearly every expert, so streaming reads the experts once per chunk: fewer, bigger chunks.
         if expertSlots != nil { generator.prefillChunk = Self.streamingPrefillChunk }
+        // Keep the cache right after each end of message (a thought's end): the next agent step resends it.
+        if let end = tokenizer.specialTokenID(PromptFormatter.Token.endMessage) { generator.boundaryTokens = [end] }
     }
 
-    /// Every chunk reads nearly all experts once, so bigger chunks read less per token; attention runs in 512-query
-    /// blocks (`Attention.queryBlock`), so the mask stays ~0.5 GB.
-    static let streamingPrefillChunk = 2048
+    /// Every chunk reads nearly all experts once per layer visit, so bigger chunks read less per token (4096: half the
+    /// reads of 2048 on long prompts); attention runs in 512-query blocks (`Attention.queryBlock`), so the mask stays
+    /// ~0.5 GB.
+    static let streamingPrefillChunk = 4096
 
     /// Share of expert lookups already in a slot (nil when not streaming).
     var expertHitRate: Double? {
@@ -146,7 +207,8 @@ public actor InklingGenerator: LanguageModel {
     public nonisolated func generate(_ messages: [ChatMessage], tools: [ToolSpec], effort: ReasoningEffort,
                                      parameters: GenerateParameters) -> AsyncThrowingStream<ModelEvent, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task {
+            // High priority: the thread waits on the GPU ~48 times per token and wakes faster at a higher QoS.
+            let task = Task(priority: .high) {
                 do {
                     try await self.run(messages, tools, effort, parameters, continuation)
                     continuation.finish()

@@ -46,3 +46,23 @@ public final class TurboPath: CausalLM {
 
     public func makeCache() -> [LayerVisitCache] { base.makeCache() }
 }
+
+/// Turbo drafts run back to back on the GPU: the expert tables stay fixed for the whole run and each guessed token
+/// feeds the next step without being read back, so there is one wait per run instead of one per token (Strata
+/// queues a token's whole work up front the same way). Misses are counted and read in after the run.
+extension TurboPath: ChainedDraft {
+    public func propose(after token: Int32, count: Int, cache: [LayerVisitCache]) -> [Int32] {
+        guard !base.expertCaches.isEmpty else { return TokenGenerator.stepDraft(self, after: token, count: count, cache: cache) }
+        base.turboBoundary()
+        var t = MLXArray([token]).reshaped([1, 1])
+        var out: [MLXArray] = []
+        for _ in 0..<count {
+            t = argMax(base(t, cache: cache, fast: true, compiled: true, lastOnly: true)[0, -1]).asType(.int32).reshaped([1, 1])
+            asyncEval(t)
+            out.append(t)
+        }
+        eval(out)
+        base.turboBoundary(tables: false)
+        return out.map { $0.item(Int32.self) }
+    }
+}

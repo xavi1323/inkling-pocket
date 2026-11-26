@@ -271,12 +271,16 @@ final class ExpertCache: @unchecked Sendable {
 
     /// Reads experts in the background (a guess at what the next step needs). Only call while no queued GPU work
     /// reads this layer's slots. Skipped when there are not enough free slots.
-    /// `experts` are ranked best guess first; ranks that rarely pay off are skipped (`StreamProfile.shouldPrefetch`).
+    /// `experts` are ranked best guess first (or by `ranks`, each expert's rank in its token's guess); ranks that
+    /// rarely pay off are skipped (`StreamProfile.shouldPrefetch`).
     /// Reads run at lower I/O priority than the reads a step is waiting on.
-    func prefetch(_ experts: [Int]) {
+    func prefetch(_ experts: [Int], ranks given: [Int]? = nil) {
         guard Set(experts).count <= slots else { return }
         var ranks: [Int: Int] = [:]
-        for (rank, e) in experts.enumerated() where ranks[e] == nil && (profile?.shouldPrefetch(rank: rank) ?? true) { ranks[e] = rank }
+        for (i, e) in experts.enumerated() {
+            let rank = given?[i] ?? i
+            if ranks[e] == nil && (profile?.shouldPrefetch(rank: rank) ?? true) { ranks[e] = rank }
+        }
         guard !ranks.isEmpty else { return }
         let ranked = ranks, wanted = experts.filter { ranks[$0] != nil }
         let delay = readDelay, group = DispatchGroup()
@@ -284,6 +288,28 @@ final class ExpertCache: @unchecked Sendable {
         queue.async { [self] in
             guard let r = reserve(wanted, counting: false, group: group, ranks: ranked), !r.jobs.isEmpty else { group.leave(); return }
             DispatchQueue.global(qos: .utility).async { [self] in
+                read(r.jobs, counting: false, delay: delay)
+                queue.sync { finish(r.jobs, group: group) }
+                group.leave()
+            }
+        }
+    }
+
+    /// Prompt chunks: reads up to `count` experts that are not in a slot, most-used first, into the least-used slots
+    /// in the background. A chunk routes to nearly every expert, so the next visit needs them anyway; reading them
+    /// while the current visit still computes overlaps storage with the GPU (HF expert streaming: 68 → 228 tok/s
+    /// prefill). Only call while no queued GPU work reads this layer's slots.
+    func readAheadMissing(_ count: Int) {
+        guard count > 0 else { return }
+        let delay = readDelay, group = DispatchGroup()
+        group.enter()
+        queue.async { [self] in
+            let wanted = Array((0..<experts).filter { slotOf[$0] == nil }.sorted { uses[$0] > uses[$1] }.prefix(count))
+            guard !wanted.isEmpty, let r = reserve(wanted, counting: false, group: group), !r.jobs.isEmpty else {
+                group.leave()
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
                 read(r.jobs, counting: false, delay: delay)
                 queue.sync { finish(r.jobs, group: group) }
                 group.leave()
@@ -454,18 +480,21 @@ final class ExpertCache: @unchecked Sendable {
         guard !jobs.isEmpty else { return }
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         let parts = self.parts
+        let reader = ExpertReader.shared
+        let (choice, size) = counting ? reader.choosePieceSize() : (-1, ExpertReader.pieceSize)
         let start = StreamProfile.now()
         var pieces: [ExpertReader.Piece] = []
         for job in jobs {
             for part in parts {
                 pieces += ExpertReader.pieces(fd: part.fd, offset: part.offset + Int64(job.expert * part.stride),
                                               length: part.stride, destination: part.destination + job.slot * part.stride,
-                                              fallback: part.source + job.expert * part.stride)
+                                              fallback: part.source + job.expert * part.stride, size: size)
             }
         }
-        ExpertReader.shared.read(pieces, urgent: counting)
+        reader.read(pieces, urgent: counting)
+        let elapsed = StreamProfile.now() - start, bytes = Int64(jobs.count * parts.map(\.stride).reduce(0, +))
+        if counting { reader.record(choice: choice, bytes: bytes, seconds: Double(elapsed) / 1e9) }
         if let profile {
-            let elapsed = StreamProfile.now() - start, bytes = Int64(jobs.count * parts.map(\.stride).reduce(0, +))
             profile.update {
                 if counting { $0.misses += jobs.count } else { $0.prefetched += jobs.count }
                 $0.readBytes += bytes

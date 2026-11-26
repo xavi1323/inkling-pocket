@@ -158,6 +158,7 @@ extension InklingGenerator {
         progress("Prefill \(tokens.count) tokens, decode \(decodeTokens)…")
         (reference as? Inkling2LanguageModel)?.smartRouting = smartRouting
         let gen = TokenGenerator(model: model, eos: [])
+        gen.exactStep = generator.exactStep
         gen.pipelined = generator.pipelined
         gen.draft = generator.draft
         let profile = (reference as? Inkling2LanguageModel)?.profile
@@ -193,9 +194,9 @@ extension InklingGenerator {
         }
         if gen.stats.checks > 0 {
             let st = gen.stats
-            report.speculation = String(format: "%.0f%% of guessed tokens kept, %.1f tokens per exact check (%d checks)",
+            report.speculation = String(format: "%.0f%% of guessed tokens kept, %.1f tokens per exact check (%d checks, %d plain steps)",
                                         Double(st.acceptedTokens) / Double(max(st.draftedTokens, 1)) * 100,
-                                        Double(st.acceptedTokens + st.checks) / Double(st.checks), st.checks)
+                                        Double(st.acceptedTokens + st.checks) / Double(st.checks), st.checks, st.plainSteps)
         }
         if let profile, let before, let afterPrefill {
             let prefillSeconds = gen.stats.prefillTokensPerSecond > 0 ? Double(gen.stats.prefilledTokens) / gen.stats.prefillTokensPerSecond : 0
@@ -223,7 +224,7 @@ extension InklingGenerator {
         }
         if let lm = reference as? Inkling2LanguageModel, !lm.expertCaches.isEmpty {
             progress("Measuring storage reads…")
-            report.storage = Self.storageSpeeds(lm.expertCaches)
+            report.storage = Self.storageSpeeds(lm.expertCaches) + " · reads in \(ExpertReader.shared.preferredPieceSize >> 10) KB pieces"
         }
         if let lm = reference as? Inkling2LanguageModel {
             progress("Recording expert routing…")

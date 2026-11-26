@@ -27,6 +27,8 @@ public struct GenerationStats: Sendable, Equatable {
     public var draftedTokens = 0
     public var acceptedTokens = 0
     public var checks = 0
+    /// Speculative decoding: tokens made by a plain exact step because guessing ahead cost more than it saved.
+    public var plainSteps = 0
     public init() {}
 }
 
@@ -73,6 +75,11 @@ final class ThinkingBudget {
     var forced: Int32? { thinking && count >= cap ? close : nil }
 }
 
+/// A draft that guesses `count` tokens after `token` in one go (caches are restored by the caller).
+public protocol ChainedDraft {
+    func propose(after token: Int32, count: Int, cache: [LayerVisitCache]) -> [Int32]
+}
+
 /// Token-level generation: chunked prefill, prompt-prefix reuse across turns, cancellation between tokens.
 /// Not thread-safe — owned by one actor.
 public final class TokenGenerator {
@@ -102,6 +109,14 @@ public final class TokenGenerator {
     private var mark: (tokens: [Int32], snapshot: [VisitSnapshot], logits: MLXArray)?
     /// The cache state after the last prompt's stable prefix (tools + instructions), for new chats.
     private var prefixMark: (tokens: [Int32], snapshot: [VisitSnapshot])?
+    /// The cache state after what the model wrote (the whole reply, and the last `boundaryTokens` in it), with the
+    /// logits after it when known. An agent's next step resends the reply, so its thinking and tool call are not
+    /// computed again. Valid only for the next prompt (it overwrites what comes after the restored point).
+    private var resumeMarks: [(tokens: [Int32], snapshot: [VisitSnapshot], logits: MLXArray?)] = []
+    /// Tokens after which the cache state is kept for the next prompt (end of message: the end of a thought).
+    public var boundaryTokens: Set<Int32> = []
+    /// An exact single-token model for plain steps between speculative checks (`model` may be turbo for one token).
+    public var exactStep: CausalLM?
 
     public init(model: CausalLM, eos: Set<Int32>) {
         self.model = model
@@ -123,7 +138,15 @@ public final class TokenGenerator {
         let start = Date()
         var from = 0
         var logits: MLXArray?
-        if let mark, prompt.count >= mark.tokens.count, prompt.starts(with: mark.tokens) {
+        let resume = resumeMarks.filter { m in
+            prompt.starts(with: m.tokens) && (prompt.count > m.tokens.count || m.logits != nil)
+        }.max { $0.tokens.count < $1.tokens.count }
+        resumeMarks = []
+        if let resume, resume.snapshot.count == cache.count {
+            for (c, s) in zip(cache, resume.snapshot) { (c as? InklingVisitCache)?.restore(s) }
+            from = resume.tokens.count
+            logits = resume.logits
+        } else if let mark, prompt.count >= mark.tokens.count, prompt.starts(with: mark.tokens) {
             for (c, s) in zip(cache, mark.snapshot) { (c as? InklingVisitCache)?.restore(s) }
             from = mark.tokens.count
             logits = mark.logits
@@ -209,6 +232,7 @@ public final class TokenGenerator {
         eval(Array(arrays.values))
         cache = fresh
         mark = nil
+        resumeMarks = []
         let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
         prefixMark = (tokens, snapshots)
         return true
@@ -234,6 +258,8 @@ public final class TokenGenerator {
         var decodeStart: ContinuousClock.Instant?
         stats.generatedTokens = 0
         stats.decodeTokensPerSecond = 0
+        var fed: [Int32] = []
+        defer { keepResume(prompt + fed, logits: fed.isEmpty ? nil : logits) }
         while produced.count < maxTokens, prompt.count + produced.count < contextLimit, !shouldStop() {
             let token = forcedToken?() ?? sampler.sample(logits, history: history).item(Int32.self)
             if !produced.isEmpty { afterStep?(0) }
@@ -248,6 +274,8 @@ public final class TokenGenerator {
             onToken(token)
             if produced.count == maxTokens || shouldStop() { break }
             logits = model(MLXArray([token]).reshaped([1, 1]), cache: cache)[0, -1]
+            fed.append(token)
+            if boundaryTokens.contains(token) { keepBoundary(prompt + fed, logits: logits) }
         }
         if let decodeStart, produced.count > 1 {
             let s = (ContinuousClock.now - decodeStart) / .seconds(1)
@@ -271,6 +299,26 @@ public final class TokenGenerator {
         return []
     }
 
+    /// The state after `tokens` (prompt + what was fed since) is kept for the next prompt: the end of the reply.
+    private func keepResume(_ tokens: [Int32], logits: MLXArray?) {
+        guard tokens.count > (mark?.tokens.count ?? 0) else { return }
+        let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
+        guard snapshots.count == cache.count else { return }
+        resumeMarks = resumeMarks.filter { $0.tokens.count < tokens.count }.suffix(1) + [(tokens, snapshots, logits)]
+    }
+
+    /// A boundary token (end of a thought) is now in the cache: keep this point too (only the latest).
+    private func keepBoundary(_ tokens: [Int32], logits: MLXArray?) {
+        let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
+        guard snapshots.count == cache.count else { return }
+        resumeMarks = [(tokens, snapshots, logits)]
+    }
+
+    /// Guessing ahead pays only when a check's tokens cost less than plain steps: plain steps are timed now and then
+    /// (`probeEvery` checks, `probeSteps` steps) and run instead for `plainRun` tokens while they are cheaper.
+    /// (Flash-MoE found MoE speculation break-even: every guessed token needs its own experts.)
+    static let probeEvery = 16, probeSteps = 2, plainRun = 32
+
     /// `generate` with speculative decoding (see `draft`): same tokens as `model` alone.
     func generateSpeculative(prompt: [Int32], stablePrefix: Int, sampler: Sampler, maxTokens: Int, shouldStop: () -> Bool,
                              onToken: (Int32) -> Void, draft: CausalLM) -> [Int32] {
@@ -285,11 +333,15 @@ public final class TokenGenerator {
         stats.draftedTokens = 0
         stats.acceptedTokens = 0
         stats.checks = 0
+        stats.plainSteps = 0
+        var fed: [Int32] = []
+        var lastLogits: MLXArray?
         defer {
             if let decodeStart, produced.count > 1 {
                 let s = (ContinuousClock.now - decodeStart) / .seconds(1)
                 stats.decodeTokensPerSecond = s > 0 ? Double(produced.count - 1) / s : 0
             }
+            keepResume(prompt + fed, logits: fed.isEmpty ? nil : lastLogits)
         }
         // Room for one more token (as `generate`'s loop condition).
         func room() -> Bool { produced.count < maxTokens && prompt.count + produced.count < contextLimit && !shouldStop() }
@@ -310,21 +362,41 @@ public final class TokenGenerator {
             return room()
         }
         func pick(_ logits: MLXArray) -> Int32 { forcedToken?() ?? sampler.sample(logits, history: history).item(Int32.self) }
+        func seconds(since t: ContinuousClock.Instant) -> Double { (ContinuousClock.now - t) / .seconds(1) }
+        func average(_ old: Double?, _ new: Double) -> Double { old.map { $0 * 0.7 + new * 0.3 } ?? new }
         guard room() else { return [] }
         var pending = pick(first)  // sampled, not yet in the cache
         var length = 4
+        var draftCost: Double?, plainCost: Double?  // seconds per token: drafted checks, plain steps
+        var plainLeft = 0, draftChecks = 0
+        let stepModel = exactStep ?? model
         while emit(pending) {
+            let begin = ContinuousClock.now
             let limit = min(length, maxTokens - produced.count, contextLimit - prompt.count - produced.count)
             var guesses = Self.lookupDraft(context, max: limit)
-            if guesses.count < 2 {
-                let snapshots = cache.map { ($0 as! InklingVisitCache).snapshot() }
-                guesses = []
-                var token = pending
-                while guesses.count < limit {
-                    token = argMax(draft(MLXArray([token]).reshaped([1, 1]), cache: cache)[0, -1]).item(Int32.self)
-                    guesses.append(token)
-                    if eos.contains(token) { break }
+            let lookup = guesses.count >= 2
+            // A plain exact step: cheaper than guessing right now, or a boundary token to keep the state after.
+            if !lookup && (plainLeft > 0 || boundaryTokens.contains(pending)) {
+                let logits = stepModel(MLXArray([pending]).reshaped([1, 1]), cache: cache)[0, -1]
+                fed.append(pending)
+                lastLogits = logits
+                let token = pick(logits)
+                if boundaryTokens.contains(pending) { keepBoundary(prompt + fed, logits: logits) }
+                stats.plainSteps += 1
+                if plainLeft > 0 {
+                    plainCost = average(plainCost, seconds(since: begin))
+                    plainLeft -= 1
+                    // Stay plain while it is clearly cheaper than guessing.
+                    if plainLeft == 0, let d = draftCost, let p = plainCost, p < d * 0.95 { plainLeft = Self.plainRun }
                 }
+                pending = token
+                continue
+            }
+            if !lookup {
+                let snapshots = cache.map { ($0 as! InklingVisitCache).snapshot() }
+                guesses = (draft as? ChainedDraft)?.propose(after: pending, count: limit, cache: cache)
+                    ?? Self.stepDraft(draft, after: pending, count: limit, cache: cache)
+                if let end = guesses.firstIndex(where: { eos.contains($0) }) { guesses = Array(guesses[...end]) }
                 for (c, s) in zip(cache, snapshots) { (c as! InklingVisitCache).restore(s) }
             }
             let input = [pending] + guesses
@@ -339,14 +411,40 @@ public final class TokenGenerator {
                 guard token == guess else { pending = token; break }
                 kept += 1
                 if !emit(token) { done = true; break }
+                // Stop at a boundary token so the cache can be kept right after it.
+                if boundaryTokens.contains(token), i + 1 < guesses.count {
+                    pending = pick(logits[0, i + 1])
+                    break
+                }
             }
             for c in cache { (c as! InklingVisitCache).keep(1 + kept, of: input.count) }
+            fed += input.prefix(1 + kept)
+            lastLogits = logits[0, kept]
+            if let last = fed.last, boundaryTokens.contains(last) { keepBoundary(prompt + fed, logits: lastLogits) }
             stats.acceptedTokens += kept
             if done { break }
             if pending < 0 { pending = pick(logits[0, guesses.count]) }
             length = kept == guesses.count ? min(length + 2, maxDraft) : max(2, kept + 1)
+            if !lookup {
+                draftCost = average(draftCost, seconds(since: begin) / Double(kept + 1))
+                draftChecks += 1
+                if draftChecks % Self.probeEvery == 0 || (plainCost == nil && draftChecks == 4) { plainLeft = Self.probeSteps }
+            }
         }
         return produced
+    }
+
+    /// Greedy guesses one model step at a time, each token fed to the next step without being read back first.
+    static func stepDraft(_ draft: CausalLM, after token: Int32, count: Int, cache: [LayerVisitCache]) -> [Int32] {
+        var t = MLXArray([token]).reshaped([1, 1])
+        var out: [MLXArray] = []
+        for _ in 0..<count {
+            t = argMax(draft(t, cache: cache)[0, -1]).asType(.int32).reshaped([1, 1])
+            asyncEval(t)
+            out.append(t)
+        }
+        eval(out)
+        return out.map { $0.item(Int32.self) }
     }
 
     /// Same tokens as `generate`; the next step's graph is built and queued while the GPU still runs the current one.

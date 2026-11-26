@@ -279,6 +279,7 @@ extension FastPathTests {
         let model = try slots.map { try ExpertStreamingTests.streamed(slots: $0) } ?? Tiny.model()
         let gen = TokenGenerator(model: FastPath(model), eos: [])
         gen.draft = draft(model)
+        gen.exactStep = model  // plain steps: the reference (its CPU steps match multi-token checks)
         let out = gen.generate(prompt: prompt, sampler: Sampler(greedy()), maxTokens: tokens, shouldStop: { false }, onToken: { _ in })
         check(gen)
         return out

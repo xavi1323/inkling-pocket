@@ -7,11 +7,13 @@ public final class FastPath: CausalLM {
     public init(_ base: Inkling2LanguageModel) { self.base = base }
 
     public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
-        base(tokens, cache: cache, fast: true, compiled: true)
+        base.turboReset()  // exact routing even right after turbo drafts
+        return base(tokens, cache: cache, fast: true, compiled: true)
     }
 
     public func lastLogits(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
-        base(tokens, cache: cache, fast: true, compiled: true, lastOnly: true)[0, -1]
+        base.turboReset()
+        return base(tokens, cache: cache, fast: true, compiled: true, lastOnly: true)[0, -1]
     }
 
     public func makeCache() -> [LayerVisitCache] { base.makeCache() }

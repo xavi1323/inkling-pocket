@@ -17,9 +17,14 @@ enum FusedMoESource {
         for (uint c = lane; c < (uint)(D / 8); c += 32) {
             float xv[8]; float xs = 0.0f;
             for (int j = 0; j < 8; ++j) { xv[j] = float(x[c * 8 + j]); xs += xv[j]; }
+            // 4- and 8-bit rows: one aligned 32/64-bit load instead of 4-8 byte loads (same bits).
             ulong gv = 0, uv = 0;
-            for (int b = 0; b < GB; ++b) gv |= ulong(gp[c * GB + b]) << (8 * b);
-            for (int b = 0; b < UB; ++b) uv |= ulong(up[c * UB + b]) << (8 * b);
+            if (GB == 4) gv = ulong(*(const device uint*)(gp + c * 4));
+            else if (GB == 8) gv = *(const device ulong*)(gp + c * 8);
+            else for (int b = 0; b < GB; ++b) gv |= ulong(gp[c * GB + b]) << (8 * b);
+            if (UB == 4) uv = ulong(*(const device uint*)(up + c * 4));
+            else if (UB == 8) uv = *(const device ulong*)(up + c * 8);
+            else for (int b = 0; b < UB; ++b) uv |= ulong(up[c * UB + b]) << (8 * b);
             float gq = 0.0f, uq = 0.0f;
             for (int j = 0; j < 8; ++j) {
                 gq += float((gv >> (j * GB)) & ((1ul << GB) - 1)) * xv[j];
@@ -55,7 +60,9 @@ enum FusedMoESource {
                 float hv[8]; float hs = 0.0f;
                 for (int j = 0; j < 8; ++j) { hv[j] = float(h[k * I + c * 8 + j]); hs += hv[j]; }
                 ulong v = 0;
-                for (int b = 0; b < DB; ++b) v |= ulong(p[c * DB + b]) << (8 * b);
+                if (DB == 4) v = ulong(*(const device uint*)(p + c * 4));
+                else if (DB == 8) v = *(const device ulong*)(p + c * 8);
+                else for (int b = 0; b < DB; ++b) v |= ulong(p[c * DB + b]) << (8 * b);
                 float q = 0.0f;
                 for (int j = 0; j < 8; ++j) q += float((v >> (j * DB)) & ((1ul << DB) - 1)) * hv[j];
                 uint g = (c * 8) / DG;
