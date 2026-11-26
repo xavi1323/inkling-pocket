@@ -10,6 +10,20 @@ public protocol LayerVisitCache: AnyObject {
     func updateAndFetch(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
 }
 
+/// Whole K/V buffers [1,H,capacity,D] after a single-token write. Slot `j < valid` holds the token
+/// `(index - 1 - j + valid) % valid` steps before the newest; slots from `valid` on are unused.
+struct DecodeKV {
+    let keys, values: MLXArray
+    let valid: Int
+    let index: Int
+
+    /// Steps back from the newest token for every slot (slots past `valid` get garbage; mask them).
+    func distances() -> MLXArray {
+        let j = MLXArray(Int32(0)..<Int32(keys.dim(2)))
+        return MLXArray(Int32(index - 1)) - j + MLXArray(Int32(valid)) * (j .>= Int32(index)).asType(.int32)
+    }
+}
+
 /// Saved cache position; restoring rewinds to it (used to reuse a chat's prompt prefix across turns).
 public struct VisitSnapshot {
     let kv: KVSnapshot
@@ -34,6 +48,11 @@ public final class InklingVisitCache: LayerVisitCache {
 
     public func updateAndFetch(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray) {
         kv.update(keys: keys, values: values)
+    }
+
+    /// Single token: writes `keys`/`values` [1,H,1,D] in place and returns the whole buffers (no copies).
+    func updateForDecode(keys: MLXArray, values: MLXArray) -> DecodeKV {
+        kv.updateForDecode(keys: keys, values: values)
     }
 
     public func snapshot() -> VisitSnapshot { VisitSnapshot(kv: kv.snapshot(), conv: convState) }
@@ -69,6 +88,7 @@ protocol KVStore: AnyObject {
     var offset: Int { get }
     var bytes: Int { get }
     func update(keys: MLXArray, values: MLXArray) -> (MLXArray, MLXArray)
+    func updateForDecode(keys: MLXArray, values: MLXArray) -> DecodeKV
     func snapshot() -> KVSnapshot
     func restore(_ s: KVSnapshot)
     /// The K/V a snapshot stands for, as standalone arrays (for saving to disk).

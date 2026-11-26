@@ -214,8 +214,9 @@ final class ExpertCache: @unchecked Sendable {
             if reservation == nil { for g in queue.sync(execute: { Array(loading.values) }) { g.wait() } }
         }
         let r = reservation!
+        for g in r.evicted { g.wait() }  // read-aheads still writing into slots we took
         read(r.jobs, counting: true, delay: readDelay)
-        queue.sync { finish(r.jobs) }
+        queue.sync { finish(r.jobs, group: group) }
         group.leave()
         for g in r.waits { g.wait() }
         return r.map
@@ -237,7 +238,7 @@ final class ExpertCache: @unchecked Sendable {
             guard let r = reserve(experts, counting: false, group: group), !r.jobs.isEmpty else { group.leave(); return }
             DispatchQueue.global(qos: .userInitiated).async { [self] in
                 read(r.jobs, counting: false, delay: delay)
-                queue.sync { finish(r.jobs) }
+                queue.sync { finish(r.jobs, group: group) }
                 group.leave()
             }
         }
@@ -248,13 +249,16 @@ final class ExpertCache: @unchecked Sendable {
         var jobs: [(expert: Int, slot: Int)]
         /// Read-aheads still filling slots in `map`.
         var waits: [DispatchGroup]
+        /// Read-aheads still filling slots taken for `jobs` (wait before reading into them).
+        var evicted: [DispatchGroup] = []
     }
 
     /// Slots being read, and the read that fills each (a slot being read is never evicted).
     private var loading: [Int: DispatchGroup] = [:]
 
     /// On `queue`: maps `experts` to slots, claiming the least-used free slots for missing ones (marked loading
-    /// under `group`). Nil, changing nothing, when too few slots are free.
+    /// under `group`). A step (`counting`) may take a slot a read-ahead is still filling (it waits for that read
+    /// first); a read-ahead never does. Nil, changing nothing, when too few slots are free.
     private func reserve(_ experts: [Int], counting: Bool, group: DispatchGroup) -> Reservation? {
         var map: [Int: Int32] = [:]
         var missing: [Int] = []
@@ -262,7 +266,7 @@ final class ExpertCache: @unchecked Sendable {
             if let s = slotOf[e] { map[e] = Int32(s) } else if !missing.contains(e) { missing.append(e) }
         }
         let held = Set(map.values.map(Int.init))
-        let free = missing.isEmpty ? [] : (0..<slots).filter { !held.contains($0) && loading[$0] == nil }.sorted { a, b in
+        let free = missing.isEmpty ? [] : (0..<slots).filter { !held.contains($0) && (counting || loading[$0] == nil) }.sorted { a, b in
             let ua = expertIn[a].map { uses[$0] } ?? -1, ub = expertIn[b].map { uses[$0] } ?? -1
             return ua != ub ? ua < ub : lastUse[a] < lastUse[b]
         }
@@ -281,7 +285,9 @@ final class ExpertCache: @unchecked Sendable {
             if let g = loading[s] { waits.append(g) }
         }
         var jobs: [(expert: Int, slot: Int)] = []
+        var evicted: [DispatchGroup] = []
         for (e, s) in zip(missing, free) {
+            if let g = loading[s] { evicted.append(g) }
             if let old = expertIn[s] {
                 slotOf[old] = nil
                 unusedPrefetch.remove(old)
@@ -295,12 +301,12 @@ final class ExpertCache: @unchecked Sendable {
             jobs.append((e, s))
         }
         if counting { misses += jobs.count } else { prefetched += jobs.count }
-        return Reservation(map: map, jobs: jobs, waits: waits)
+        return Reservation(map: map, jobs: jobs, waits: waits, evicted: evicted)
     }
 
-    /// On `queue`: the reads of `jobs` are done.
-    private func finish(_ jobs: [(expert: Int, slot: Int)]) {
-        for j in jobs { loading[j.slot] = nil }
+    /// On `queue`: the reads of `jobs` (under `group`) are done; slots since taken by another read stay marked.
+    private func finish(_ jobs: [(expert: Int, slot: Int)], group: DispatchGroup) {
+        for j in jobs where loading[j.slot] === group { loading[j.slot] = nil }
     }
 
     /// Off `queue`: copies the experts of `jobs` into their slots (all parts in parallel).

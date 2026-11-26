@@ -93,10 +93,21 @@ final class Attention {
         MLXArray(Int32(offset + 1)..<Int32(offset + 1 + length)).asType(.float32)
     }
 
-    /// Attention over the cache (updated with this step's k/v): [B,H,L,D].
-    func attend(_ p: Projected, cache: LayerVisitCache?) -> MLXArray {
+    /// Single-token steps attended straight over the cache buffers (`DecodeAttention`).
+    private(set) var cacheSteps = 0
+
+    /// Attention over the cache (updated with this step's k/v): [B,H,L,D]. `inPlace`: a single token reads the
+    /// cache buffers directly instead of a masked copy.
+    func attend(_ p: Projected, cache: LayerVisitCache?, inPlace: Bool = false) -> MLXArray {
         let (b, length) = (p.q.dim(0), p.q.dim(2))
         let dtype = p.q.dtype
+        if inPlace, b == 1, length == 1, let cache = cache as? InklingVisitCache {
+            cacheSteps += 1
+            let kv = cache.updateForDecode(keys: p.k, values: p.v)
+            let rel = matmul(p.r, relProj.asType(dtype)).reshaped([nHeads, relExtent])
+            return DecodeAttention.callAsFunction(q: p.q, kv: kv, rel: rel, sinks: p.sinks.reshaped([nHeads]), kvHeads: nKV,
+                                                  sliding: sliding, relExtent: relExtent)
+        }
         var (k, v) = (p.k, p.v)
         if let cache { (k, v) = cache.updateAndFetch(keys: k, values: v) }
         let size = k.dim(2)

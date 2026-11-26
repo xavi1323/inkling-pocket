@@ -124,6 +124,24 @@ import InklingCore
         #expect(cache.misses == 1 && cache.prefetched == 1 && cache.hits == 1)
     }
 
+    /// A wrong read-ahead still being read is the cheapest slot to reuse: a step evicts it (after its read ends)
+    /// rather than an expert used often.
+    @Test func stepEvictsLoadingReadAheadBeforeHotExpert() throws {
+        let weights = try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")])
+        let path = "model.layers.0.mlp"
+        let cache = try ExpertCache(path: path, weights: weights, quant: try Tiny.config().quantization,
+                                    prefix: "language_model.", slots: 3)
+        for _ in 0..<4 { _ = cache.ensure([0, 1]) }
+        cache.readDelay = 0.2
+        cache.prefetch([2])
+        Thread.sleep(forTimeInterval: 0.05)
+        cache.readDelay = 0
+        let map = cache.ensure([3])
+        #expect(cache.slot(of: 0) != nil && cache.slot(of: 1) != nil && cache.slot(of: 2) == nil)
+        let full = try weights.array("language_model.\(path).switch_mlp.down_proj.weight")
+        #expect(arrayEqual(cache.down.weight[Int(map[3]!)], full[3]).item(Bool.self))
+    }
+
     /// With every slot held by read-aheads, a step that needs a new expert waits for them and still gets it.
     @Test func ensureWaitsWhenReadAheadHoldsAllSlots() throws {
         let weights = try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")])

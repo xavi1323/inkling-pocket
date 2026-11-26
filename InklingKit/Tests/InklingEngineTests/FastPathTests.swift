@@ -89,6 +89,34 @@ import Metal
         #expect(model.model.layers.allSatisfy { $0.compiledSteps > 0 })
     }
 
+    /// Single-token attention straight over the cache buffers (no mask or sink copies), including the sliding
+    /// window's ring after it wraps and after a prompt longer than the window.
+    @Test func decodeAttentionOverCacheMatchesReference() throws {
+        DecoderLayer.splitOnCPU = true
+        compile(enable: false)
+        defer {
+            DecoderLayer.splitOnCPU = false
+            compile(enable: true)
+        }
+        let model = try Tiny.model()
+        let window = try Tiny.config().text.slidingWindowSize
+        for promptLength in [3, window + 3] {
+            let all = (0..<(promptLength + window + 6)).map { Int32(($0 * 53 + 7) % 500) }
+            let refCache = model.makeCache(), testCache = model.makeCache()
+            let prompt = MLXArray(Array(all.prefix(promptLength))).reshaped([1, -1])
+            _ = model(prompt, cache: refCache)
+            _ = model(prompt, cache: testCache)
+            for token in all.dropFirst(promptLength) {
+                let t = MLXArray([token]).reshaped([1, 1])
+                let a = model(t, cache: refCache)[0, -1]
+                let b = model(t, cache: testCache, fast: false, compiled: true)[0, -1]
+                let scale = max(abs(a).max().item(Float.self), 1)
+                #expect(abs(a - b).max().item(Float.self) <= 1e-3 * scale, "prompt \(promptLength), \(token)")
+            }
+        }
+        #expect(model.model.layers.allSatisfy { $0.attention.cacheSteps > 0 })
+    }
+
     @Test func gpuSamplerGreedyEqualsArgmax() {
         let logits = MLXRandom.normal([1, 1, 500], key: MLXRandom.key(4))
         let token = GPUSampler(Sampler(greedy())).sample(logits, history: nil)

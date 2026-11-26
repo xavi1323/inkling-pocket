@@ -141,7 +141,7 @@ final class DecoderLayer {
         cache.conv[0] = p.stateK
         cache.conv[1] = p.stateV
         let mlpBlocks = isBlockBoundary ? blocks + [x] : blocks
-        let post = compiledPost[hasMessages]!([attention.attend(p, cache: cache), p.gate, x, states[2]] + message + mlpBlocks)
+        let post = compiledPost[hasMessages]!([attention.attend(p, cache: cache, inPlace: true), p.gate, x, states[2]] + message + mlpBlocks)
         cache.conv[2] = post[2]
         blocks = mlpBlocks
         let hidden = moe(post[1], onRoute: onRoute, fast: fast).asType(x.dtype)

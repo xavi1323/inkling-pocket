@@ -30,6 +30,11 @@ final class KVCache: KVStore {
         return (keys![0..., 0..., ..<offset, 0...], values![0..., 0..., ..<offset, 0...])
     }
 
+    func updateForDecode(keys k: MLXArray, values v: MLXArray) -> DecodeKV {
+        _ = update(keys: k, values: v)  // the returned slices are never evaluated
+        return DecodeKV(keys: keys!, values: values!, valid: offset, index: offset)
+    }
+
     func snapshot() -> KVSnapshot { KVSnapshot(offset: offset, index: offset) }
     func restore(_ s: KVSnapshot) { offset = s.offset }
 

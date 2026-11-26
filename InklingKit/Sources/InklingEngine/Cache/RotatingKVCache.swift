@@ -20,6 +20,12 @@ final class RotatingKVCache: KVStore {
         return (temporalOrder(rk), temporalOrder(rv))
     }
 
+    func updateForDecode(keys k: MLXArray, values v: MLXArray) -> DecodeKV {
+        _ = updateInPlace(k, v)
+        // Below the window the buffer may be padded past `offset`; once full it is exactly the window, a ring.
+        return DecodeKV(keys: keys!, values: values!, valid: min(offset, keys!.dim(2)), index: index)
+    }
+
     private func trim(_ size: Int, _ a: MLXArray, append: MLXArray? = nil) -> MLXArray {
         var parts = [size > 0 ? a[0..., 0..., size..., 0...] : a]
         if let append { parts.append(append) }
