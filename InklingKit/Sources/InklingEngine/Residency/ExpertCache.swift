@@ -48,6 +48,8 @@ final class ExpertCache: @unchecked Sendable {
     private var unusedPrefetch = Set<Int>()
     /// Shared by the model's caches; nil = not measured.
     var profile: StreamProfile?
+    /// Tests: seconds each read waits first (taken when `ensure`/`prefetch` is called).
+    var readDelay: TimeInterval = 0
     /// Serialises slot changes: `ensure` (generation thread) and `prefetch` (background).
     private let queue = DispatchQueue(label: "inkling.expert-cache", qos: .userInitiated)
 
@@ -141,12 +143,28 @@ final class ExpertCache: @unchecked Sendable {
 
     func slot(of expert: Int) -> Int? { slotOf[expert] }
 
-    /// Puts `experts` (at most `slots` distinct ids) into slots, copying the missing ones; returns expert → slot.
-    /// Waits for a running `prefetch` first.
+    /// Puts `experts` (at most `slots` distinct ids) into slots, reading the missing ones; returns expert → slot.
+    /// Waits only for read-aheads of experts it needs (or, when read-aheads hold every free slot, for them all).
     func ensure(_ experts: [Int]) -> [Int: Int32] {
         precondition(Set(experts).count <= slots, "more experts than slots")
-        guard let profile else { return queue.sync { fill(experts, counting: true) } }
-        return profile.time(\.expertWait) { queue.sync { fill(experts, counting: true) } }
+        guard let profile else { return ensureUnmeasured(experts) }
+        return profile.time(\.expertWait) { ensureUnmeasured(experts) }
+    }
+
+    private func ensureUnmeasured(_ experts: [Int]) -> [Int: Int32] {
+        let group = DispatchGroup()
+        group.enter()
+        var reservation: Reservation?
+        while reservation == nil {
+            reservation = queue.sync { reserve(experts, counting: true, group: group) }
+            if reservation == nil { for g in queue.sync(execute: { Array(loading.values) }) { g.wait() } }
+        }
+        let r = reservation!
+        read(r.jobs, counting: true, delay: readDelay)
+        queue.sync { finish(r.jobs) }
+        group.leave()
+        for g in r.waits { g.wait() }
+        return r.map
     }
 
     /// `experts` reordered so those already in a slot come first: running them in slot-sized groups in this order
@@ -156,36 +174,57 @@ final class ExpertCache: @unchecked Sendable {
     }
 
     /// Reads experts in the background (a guess at what the next step needs). Only call while no queued GPU work
-    /// reads this layer's slots.
+    /// reads this layer's slots. Skipped when there are not enough free slots.
     func prefetch(_ experts: [Int]) {
         guard Set(experts).count <= slots else { return }
-        queue.async { [self] in _ = fill(experts, counting: false) }
+        let delay = readDelay, group = DispatchGroup()
+        group.enter()
+        queue.async { [self] in
+            guard let r = reserve(experts, counting: false, group: group), !r.jobs.isEmpty else { group.leave(); return }
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                read(r.jobs, counting: false, delay: delay)
+                queue.sync { finish(r.jobs) }
+                group.leave()
+            }
+        }
     }
 
-    private func fill(_ experts: [Int], counting: Bool) -> [Int: Int32] {
+    private struct Reservation {
+        var map: [Int: Int32]
+        var jobs: [(expert: Int, slot: Int)]
+        /// Read-aheads still filling slots in `map`.
+        var waits: [DispatchGroup]
+    }
+
+    /// Slots being read, and the read that fills each (a slot being read is never evicted).
+    private var loading: [Int: DispatchGroup] = [:]
+
+    /// On `queue`: maps `experts` to slots, claiming the least-used free slots for missing ones (marked loading
+    /// under `group`). Nil, changing nothing, when too few slots are free.
+    private func reserve(_ experts: [Int], counting: Bool, group: DispatchGroup) -> Reservation? {
+        var map: [Int: Int32] = [:]
+        var missing: [Int] = []
+        for e in experts where map[e] == nil {
+            if let s = slotOf[e] { map[e] = Int32(s) } else if !missing.contains(e) { missing.append(e) }
+        }
+        let held = Set(map.values.map(Int.init))
+        let free = missing.isEmpty ? [] : (0..<slots).filter { !held.contains($0) && loading[$0] == nil }.sorted { a, b in
+            let ua = expertIn[a].map { uses[$0] } ?? -1, ub = expertIn[b].map { uses[$0] } ?? -1
+            return ua != ub ? ua < ub : lastUse[a] < lastUse[b]
+        }
+        guard free.count >= missing.count else { return nil }
         clock += 1
         if counting {
             if clock % Self.agingPeriod == 0 { uses = uses.map { $0 / 2 } }
             for e in Set(experts) { uses[e] += 1 }
+            hits += map.count
+            let used = map.keys.filter { unusedPrefetch.remove($0) != nil }.count
+            if used > 0 { profile?.update { $0.prefetchUsed += used } }
         }
-        var map: [Int: Int32] = [:]
-        var missing: [Int] = []
-        for e in experts where map[e] == nil {
-            if let s = slotOf[e] {
-                lastUse[s] = clock
-                map[e] = Int32(s)
-                if counting {
-                    hits += 1
-                    if unusedPrefetch.remove(e) != nil { profile?.update { $0.prefetchUsed += 1 } }
-                }
-            } else if !missing.contains(e) {
-                missing.append(e)
-            }
-        }
-        guard !missing.isEmpty else { return map }
-        let free = (0..<slots).filter { lastUse[$0] != clock }.sorted { a, b in
-            let ua = expertIn[a].map { uses[$0] } ?? -1, ub = expertIn[b].map { uses[$0] } ?? -1
-            return ua != ub ? ua < ub : lastUse[a] < lastUse[b]
+        var waits: [DispatchGroup] = []
+        for s in map.values.map(Int.init) {
+            lastUse[s] = clock
+            if let g = loading[s] { waits.append(g) }
         }
         var jobs: [(expert: Int, slot: Int)] = []
         for (e, s) in zip(missing, free) {
@@ -197,14 +236,27 @@ final class ExpertCache: @unchecked Sendable {
             expertIn[s] = e
             slotOf[e] = s
             lastUse[s] = clock
+            loading[s] = group
             map[e] = Int32(s)
             jobs.append((e, s))
         }
         if counting { misses += jobs.count } else { prefetched += jobs.count }
-        let parts = self.parts, copies = jobs
+        return Reservation(map: map, jobs: jobs, waits: waits)
+    }
+
+    /// On `queue`: the reads of `jobs` are done.
+    private func finish(_ jobs: [(expert: Int, slot: Int)]) {
+        for j in jobs { loading[j.slot] = nil }
+    }
+
+    /// Off `queue`: copies the experts of `jobs` into their slots (all parts in parallel).
+    private func read(_ jobs: [(expert: Int, slot: Int)], counting: Bool, delay: TimeInterval) {
+        guard !jobs.isEmpty else { return }
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+        let parts = self.parts
         let start = StreamProfile.now()
         DispatchQueue.concurrentPerform(iterations: jobs.count * parts.count) { i in
-            let job = copies[i / parts.count], part = parts[i % parts.count]
+            let job = jobs[i / parts.count], part = parts[i % parts.count]
             Self.load(part, expert: job.expert, slot: job.slot)
         }
         if let profile {
@@ -215,6 +267,5 @@ final class ExpertCache: @unchecked Sendable {
                 $0.readTime += elapsed
             }
         }
-        return map
     }
 }

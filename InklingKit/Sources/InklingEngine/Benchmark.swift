@@ -30,6 +30,8 @@ public struct BenchmarkReport: Sendable, Equatable {
     /// Where streaming time went (empty when not streaming).
     public var prefillProfile = ""
     public var decodeProfile = ""
+    /// Decode speed with no routing waits or expert reads (streaming only).
+    public var ceiling = ""
     public init() {}
 
     public var asText: String {
@@ -49,6 +51,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Thermal: \(thermalState)",
             "Prefill time (whole prompt): \(prefillProfile.isEmpty ? "n/a" : prefillProfile)",
             "Decode time per token: \(decodeProfile.isEmpty ? "n/a" : decodeProfile)",
+            "Decode ceiling (no routing waits or reads): \(ceiling.isEmpty ? "n/a" : ceiling)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
             "Routing:",
             routing,
@@ -140,6 +143,21 @@ extension InklingGenerator {
             let steps = max(gen.stats.generatedTokens - 1, 1)
             let decodeSeconds = gen.stats.decodeTokensPerSecond > 0 ? Double(steps) / gen.stats.decodeTokensPerSecond : 0
             report.decodeProfile = (profile.snapshot - afterPrefill).summary(tokens: steps, seconds: decodeSeconds)
+        }
+        if let lm = reference as? Inkling2LanguageModel, profile != nil {
+            progress("Measuring the decode ceiling…")
+            lm.ignoreRouting = true
+            defer { lm.ignoreRouting = false }
+            var parts: [String] = []
+            for (name, m) in [("fast", fast), ("reference", reference)] {
+                let ceiling = TokenGenerator(model: m, eos: [])
+                try withError {
+                    ceiling.generate(prompt: Array(tokens.prefix(16)), sampler: Sampler(greedy), maxTokens: 48,
+                                     shouldStop: { Task.isCancelled }, onToken: { _ in })
+                }
+                parts.append("\(name) " + String(format: "%.1f tok/s", ceiling.stats.decodeTokensPerSecond))
+            }
+            report.ceiling = parts.joined(separator: ", ")
         }
         if let lm = reference as? Inkling2LanguageModel {
             progress("Recording expert routing…")

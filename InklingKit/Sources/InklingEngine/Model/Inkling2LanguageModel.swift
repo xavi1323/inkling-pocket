@@ -50,6 +50,12 @@ public final class Inkling2LanguageModel: CausalLM {
         return try load(config: InklingModelConfig.decode(data), weights: weights)
     }
 
+    /// Benchmark only: see `SparseMoE.ignoreRouting`.
+    var ignoreRouting: Bool {
+        get { model.layers.first?.moe.ignoreRouting ?? false }
+        set { for l in model.layers { l.moe.ignoreRouting = newValue } }
+    }
+
     /// One per MoE layer when experts are streamed.
     var expertCaches: [ExpertCache] { model.layers.compactMap { $0.moe.cache } }
 

@@ -51,12 +51,20 @@ final class SparseMoE {
 
     /// The MoE of the next layer visit (set by TextModel before each visit): its experts are read ahead.
     weak var next: SparseMoE?
+    /// Benchmark only: single-token steps use the first `topK` slots without reading the routing back (wrong
+    /// answers; shows the speed with no routing waits or expert reads).
+    var ignoreRouting = false
 
     func callAsFunction(_ x: MLXArray, onRoute: ((MLXArray) -> Void)? = nil, fast: Bool = false) -> MLXArray {
         let (indices, weights) = route(x)
         onRoute?(indices)
         guard let cache else { return experts(x, indices, weights, fast: fast) }
         let (b, length, d) = (x.dim(0), x.dim(1), x.dim(2))
+        if ignoreRouting, b * length == 1 {
+            let out = experts(x, MLXArray(Array(0..<Int32(topK))).reshaped(indices.shape), weights, fast: fast)
+            asyncEval(out)
+            return out
+        }
         // Single token: guess the next visit's experts from this input (its router on our input) and read them in
         // while the GPU works. Safe: everything queued before reading the routing back has finished, and the work
         // queued after it only reads this layer's slots.

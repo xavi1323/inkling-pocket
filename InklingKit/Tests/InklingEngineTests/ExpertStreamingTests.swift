@@ -104,6 +104,55 @@ import InklingCore
         #expect(cache.residentFirst([4, 1, 5, 0]) == [1, 0, 4, 5])
     }
 
+    /// A step waits only for the read-ahead experts it needs, not for wrong guesses still being read.
+    @Test func ensureSkipsUnneededReadAhead() throws {
+        let weights = try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")])
+        let path = "model.layers.0.mlp"
+        let cache = try ExpertCache(path: path, weights: weights, quant: try Tiny.config().quantization,
+                                    prefix: "language_model.", slots: 4)
+        cache.readDelay = 0.5
+        cache.prefetch([3])
+        Thread.sleep(forTimeInterval: 0.05)  // the read-ahead has reserved its slot and is reading
+        cache.readDelay = 0
+        let start = Date()
+        _ = cache.ensure([0])
+        #expect(Date().timeIntervalSince(start) < 0.3)
+        let map = cache.ensure([3])  // needs the read-ahead: waits for it, then the slot holds expert 3
+        #expect(Date().timeIntervalSince(start) >= 0.4)
+        let full = try weights.array("language_model.\(path).switch_mlp.down_proj.weight")
+        #expect(arrayEqual(cache.down.weight[Int(map[3]!)], full[3]).item(Bool.self))
+        #expect(cache.misses == 1 && cache.prefetched == 1 && cache.hits == 1)
+    }
+
+    /// With every slot held by read-aheads, a step that needs a new expert waits for them and still gets it.
+    @Test func ensureWaitsWhenReadAheadHoldsAllSlots() throws {
+        let weights = try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")])
+        let path = "model.layers.0.mlp"
+        let cache = try ExpertCache(path: path, weights: weights, quant: try Tiny.config().quantization,
+                                    prefix: "language_model.", slots: 2)
+        cache.readDelay = 0.2
+        cache.prefetch([1, 2])
+        Thread.sleep(forTimeInterval: 0.05)
+        cache.readDelay = 0
+        let map = cache.ensure([0, 1])
+        let full = try weights.array("language_model.\(path).switch_mlp.down_proj.weight")
+        #expect(arrayEqual(cache.down.weight[Int(map[0]!)], full[0]).item(Bool.self))
+        #expect(arrayEqual(cache.down.weight[Int(map[1]!)], full[1]).item(Bool.self))
+    }
+
+    /// The benchmark's ceiling run decodes without reading routing back or reading experts.
+    @Test func ignoringRoutingReadsNothing() throws {
+        let model = try Self.streamed(slots: 3)
+        let gen = TokenGenerator(model: model, eos: [])
+        gen.prefill(Array(tokens.prefix(4)))
+        let before = try #require(model.profile).snapshot
+        model.ignoreRouting = true
+        defer { model.ignoreRouting = false }
+        for t in tokens.prefix(3) { eval(model(MLXArray([t]).reshaped([1, 1]), cache: nil)) }
+        let after = model.profile!.snapshot
+        #expect(after.misses == before.misses && after.gpuWait == before.gpuWait)
+    }
+
     /// The benchmark's time breakdown counts every expert read.
     @Test func profileCountsReads() throws {
         let model = try Self.streamed(slots: 3)
