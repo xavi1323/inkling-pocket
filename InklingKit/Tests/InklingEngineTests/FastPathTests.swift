@@ -369,3 +369,71 @@ extension FastPathTests {
         #expect(b.forced == nil)  // not thinking
     }
 }
+
+/// Smart expert picks (cache-aware routing, Skliar et al. 2412.00099): a token always uses its top experts; the rest
+/// come from the router's next best, preferring experts already in a slot, so fewer are read from storage.
+extension FastPathTests {
+    func routerInput(_ model: Inkling2LanguageModel) -> MLXArray { input(model, seed: 3) }
+
+    @Test func smartPicksMatchRouterWhenEverythingIsResident() throws {
+        let model = try Tiny.model()
+        let moe = model.model.layers[0].moe
+        let x = routerInput(model)
+        let (want, wantW) = moe.route(x)
+        let all = MLXArray.ones([moe.gateWeight.dim(0)])
+        let (got, gotW) = moe.smartRoute(x, resident: all, keepTop: 1, pickFrom: 8)
+        #expect(Set(got.asArray(Int32.self)) == Set(want.asArray(Int32.self)))
+        #expect(abs(gotW.sum() - wantW.sum()).item(Float.self) < 1e-4)
+    }
+
+    @Test func smartPicksKeepTheTopExpertAndSwapTheRestForResidentOnes() throws {
+        let model = try Tiny.model()
+        let moe = model.model.layers[0].moe
+        let x = routerInput(model)
+        let experts = moe.gateWeight.dim(0)
+        let scores = (sigmoid(matmul(x.asType(.float32), moe.gateWeight.asType(.float32).T)) + moe.scoreBias).reshaped([-1])
+        let ranked = argSort(-scores).asArray(Int32.self)  // best first
+        var mask = [Float](repeating: 1, count: experts)
+        mask[Int(ranked[0])] = 0  // top expert missing: still used
+        mask[Int(ranked[1])] = 0  // second missing: swapped for the third (resident)
+        let (got, w) = moe.smartRoute(x, resident: MLXArray(mask), keepTop: 1, pickFrom: 8)
+        #expect(Set(got.asArray(Int32.self)) == [ranked[0], ranked[2]])
+        #expect(abs(w.sum().item(Float.self) - model.config.routeScale) < 1e-3)
+        // Nothing resident in the pool: the router's own picks.
+        let (none, _) = moe.smartRoute(x, resident: MLXArray.zeros([experts]), keepTop: 1, pickFrom: 8)
+        #expect(Set(none.asArray(Int32.self)) == [ranked[0], ranked[1]])
+    }
+
+    @Test func smartRoutingIsExactWhenEveryExpertIsInASlot() throws {
+        let experts = try Tiny.config().text.numExperts
+        let want = try exact(slots: experts, prompt: specPrompt, tokens: 12)
+        let model = try ExpertStreamingTests.streamed(slots: experts)
+        model.smartRouting = true
+        let got = TokenGenerator(model: model, eos: [])
+            .generate(prompt: specPrompt, sampler: Sampler(greedy()), maxTokens: 12, shouldStop: { false }, onToken: { _ in })
+        #expect(got == want)
+    }
+
+    @Test func smartRoutingReadsFewerExperts() throws {
+        func misses(smart: Bool) throws -> Int {
+            let model = try ExpertStreamingTests.streamed(slots: 3)
+            model.smartRouting = smart
+            model.smartKeepTop = 1
+            _ = TokenGenerator(model: model, eos: [])
+                .generate(prompt: specPrompt, sampler: Sampler(greedy()), maxTokens: 16, shouldStop: { false }, onToken: { _ in })
+            return model.expertCaches.map(\.misses).reduce(0, +)
+        }
+        #expect(try misses(smart: true) < misses(smart: false))
+    }
+
+    @Test func toolCallsRunExact() {
+        let w = ExactSpan(open: 10, close: 11)
+        #expect(!w.inside)
+        w.observe(10)
+        #expect(w.inside)
+        w.observe(5)
+        #expect(w.inside)
+        w.observe(11)
+        #expect(!w.inside)
+    }
+}

@@ -29,6 +29,7 @@ final class AppSettings {
     var memoryBudgetOverrideGB: Double { didSet { defaults.set(memoryBudgetOverrideGB, forKey: "memoryBudgetOverrideGB") } }
     var enginePath: EnginePath { didSet { defaults.set(enginePath.rawValue, forKey: "enginePath") } }
     var keepModelInPlace: Bool { didSet { defaults.set(keepModelInPlace, forKey: "keepModelInPlace") } }
+    var smartRouting: Bool { didSet { defaults.set(smartRouting, forKey: "smartRouting") } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -53,5 +54,6 @@ final class AppSettings {
         defaults.set(true, forKey: "turboOffered")
         enginePath = EnginePath(rawValue: defaults.string(forKey: "enginePath") ?? "") ?? .turbo
         keepModelInPlace = defaults.object(forKey: "keepModelInPlace") as? Bool ?? false
+        smartRouting = defaults.object(forKey: "smartRouting") as? Bool ?? true
     }
 }

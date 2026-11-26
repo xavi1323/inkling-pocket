@@ -139,6 +139,10 @@ public actor InklingGenerator: LanguageModel {
 
     public func setContextLimit(_ tokens: Int) { generator.contextLimit = tokens }
 
+    /// Smart expert picks (faster, near-exact; tool calls stay exact). On by default.
+    public private(set) var smartRouting = true
+    public func setSmartRouting(_ on: Bool) { smartRouting = on }
+
     public nonisolated func generate(_ messages: [ChatMessage], tools: [ToolSpec], effort: ReasoningEffort,
                                      parameters: GenerateParameters) -> AsyncThrowingStream<ModelEvent, Error> {
         AsyncThrowingStream { continuation in
@@ -175,9 +179,20 @@ public actor InklingGenerator: LanguageModel {
             }
             generator.forcedToken = budget.map { b in { b.forced } }
             defer { generator.forcedToken = nil }
+            // Smart expert picks, except inside tool calls (their JSON must be exact).
+            let lm = (generator.model as? TurboPath)?.base ?? (generator.model as? FastPath)?.base ?? (generator.model as? Inkling2LanguageModel)
+            let smart = smartRouting
+            lm?.smartRouting = smart
+            let toolSpan = tokenizer.specialTokenID(PromptFormatter.Token.invokeToolJSON).flatMap { open in
+                tokenizer.specialTokenID(PromptFormatter.Token.endMessage).map { ExactSpan(open: open, close: $0) }
+            }
             generator.generate(prompt: prompt, stablePrefix: stablePrefix, sampler: Sampler(parameters), maxTokens: parameters.maxTokens,
                                shouldStop: { Task.isCancelled || ended }) { token in
                 budget?.observe(token)
+                if let toolSpan {
+                    toolSpan.observe(token)
+                    lm?.smartRouting = smart && !toolSpan.inside
+                }
                 for event in parser.feed(decoder.append(token)) {
                     out.yield(event)
                     if event == .end { ended = true }

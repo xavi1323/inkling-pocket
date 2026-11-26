@@ -36,6 +36,7 @@ public struct BenchmarkReport: Sendable, Equatable {
     public var turboSwaps = ""
     /// Speculative decoding: share of guessed tokens kept, tokens per check.
     public var speculation = ""
+    public var smartRouting = false
     /// Expert read speed from storage, by read style.
     public var storage = ""
     public init() {}
@@ -60,6 +61,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Read-ahead used, by guess rank: \(guessRanks.isEmpty ? "n/a" : guessRanks)",
             "Turbo swaps: \(turboSwaps.isEmpty ? "n/a (not turbo)" : turboSwaps)",
             "Guess ahead: \(speculation.isEmpty ? "n/a" : speculation)",
+            "Smart expert picks: \(smartRouting ? "on (top \(SparseMoE.smartKeepTopDefault) always exact)" : "off")",
             "Decode ceiling (no routing waits or reads): \(ceiling.isEmpty ? "n/a" : ceiling)",
             "Storage reads: \(storage.isEmpty ? "n/a" : storage)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
@@ -154,6 +156,7 @@ extension InklingGenerator {
         var greedy = GenerateParameters()
         greedy.temperature = 0
         progress("Prefill \(tokens.count) tokens, decode \(decodeTokens)…")
+        (reference as? Inkling2LanguageModel)?.smartRouting = smartRouting
         let gen = TokenGenerator(model: model, eos: [])
         gen.pipelined = generator.pipelined
         gen.draft = generator.draft
@@ -168,6 +171,7 @@ extension InklingGenerator {
         try Task.checkCancellation()
         var report = BenchmarkReport()
         report.enginePath = path
+        report.smartRouting = smartRouting && (reference as? Inkling2LanguageModel)?.expertCaches.isEmpty == false
         report.promptTokens = gen.stats.promptTokens
         report.generatedTokens = gen.stats.generatedTokens
         report.prefillTokensPerSecond = gen.stats.prefillTokensPerSecond

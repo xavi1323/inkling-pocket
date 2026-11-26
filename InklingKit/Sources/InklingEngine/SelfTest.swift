@@ -107,12 +107,38 @@ public enum SelfTest {
     }
 }
 
+/// Runs `inner` with smart expert picks set to `smart` (both self-test paths share one model).
+final class WithRouting: CausalLM {
+    let inner: CausalLM
+    let lm: Inkling2LanguageModel
+    let smart: Bool
+    init(_ inner: CausalLM, lm: Inkling2LanguageModel, smart: Bool) {
+        self.inner = inner
+        self.lm = lm
+        self.smart = smart
+    }
+    func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
+        lm.smartRouting = smart
+        return inner(tokens, cache: cache)
+    }
+    func lastLogits(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
+        lm.smartRouting = smart
+        return inner.lastLogits(tokens, cache: cache)
+    }
+    func makeCache() -> [LayerVisitCache] { inner.makeCache() }
+}
+
 extension InklingGenerator {
     /// Runs the self-test on the loaded model: path comparison on 3 prompts × 64 tokens, then the known answers.
     public func selfTest(progress: @escaping @Sendable (String) -> Void = { _ in }) async throws -> SelfTestReport {
         var (reference, fast) = paths()
         // With speculative decoding turbo only drafts; the tokens come from exact checks.
         if generator.draft != nil, let lm = reference as? Inkling2LanguageModel { fast = FastPath(lm) }
+        // Exact reference against what chat runs (smart expert picks when on).
+        if let lm = reference as? Inkling2LanguageModel {
+            reference = WithRouting(lm, lm: lm, smart: false)
+            fast = WithRouting(fast, lm: lm, smart: smartRouting)
+        }
         var sequences: [[Int32]] = []
         var greedy = GenerateParameters()
         greedy.temperature = 0

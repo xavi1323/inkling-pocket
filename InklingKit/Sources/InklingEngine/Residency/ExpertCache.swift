@@ -254,6 +254,16 @@ final class ExpertCache: @unchecked Sendable {
         queue.sync { experts.filter { slotOf[$0] != nil } + experts.filter { slotOf[$0] == nil } }
     }
 
+    /// 1 for every expert in a slot (read or being read), 0 otherwise: [experts] FP32.
+    func residentMask() -> MLXArray {
+        let mask = queue.sync { () -> [Float] in
+            var m = [Float](repeating: 0, count: experts)
+            for e in slotOf.keys { m[e] = 1 }
+            return m
+        }
+        return MLXArray(mask)
+    }
+
     /// Which of `experts` are in a slot now.
     func resident(_ experts: [Int]) -> Set<Int> {
         queue.sync { Set(experts.filter { slotOf[$0] != nil }) }

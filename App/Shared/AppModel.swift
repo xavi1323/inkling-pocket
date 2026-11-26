@@ -79,6 +79,7 @@ final class AppModel {
                 try await InklingGenerator(modelFolder: folder, path: path, memoryBudgetGB: override > 0 ? override : nil)
             }.value
             await engine.setContextLimit(settings.contextCap)
+            await engine.setSmartRouting(settings.smartRouting)
             guard !Task.isCancelled else { return }
             model = engine
             loadedEngine = (folder, path, budget)
@@ -99,8 +100,11 @@ final class AppModel {
     /// Settings → context size changed: pass it to the loaded engine (a memory budget change reloads the engine).
     func applyEngineSettings() {
         guard let engine = model as? InklingGenerator else { return }
-        let cap = settings.contextCap
-        Task { await engine.setContextLimit(cap) }
+        let cap = settings.contextCap, smart = settings.smartRouting
+        Task {
+            await engine.setContextLimit(cap)
+            await engine.setSmartRouting(smart)
+        }
     }
 
     /// Stops every running generation (e.g. when the app goes to the background).

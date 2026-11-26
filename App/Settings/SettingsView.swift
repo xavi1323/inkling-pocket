@@ -33,6 +33,7 @@ struct SettingsView: View {
                 Picker("Engine", selection: $settings.enginePath) {
                     ForEach(EnginePath.allCases) { Text($0.title).tag($0) }
                 }
+                Toggle("Smart expert picks (faster, near-exact)", isOn: $settings.smartRouting)
                 LabeledContent("Model", value: app.engineStatus.text)
                 LabeledContent("Memory budget") {
                     Stepper(settings.memoryBudgetOverrideGB == 0 ? "Automatic" : String(format: "%.1f GB", settings.memoryBudgetOverrideGB),
@@ -42,7 +43,7 @@ struct SettingsView: View {
             } header: {
                 Text("Engine")
             } footer: {
-                Text("Reference is slower but simple; use it to check answers if the fast engine looks wrong.")
+                Text("Smart expert picks: each word keeps its top experts and swaps lower-ranked ones for experts already in memory, so far fewer are read from storage. Tool calls always run exact. Reference is slower but simple; use it to check answers if the fast engine looks wrong.")
             }
             Section("About") {
                 Text("Built on mlx-swift, mlx-vlm, OpenUI and SwiftSoup. This product includes software developed by UncleCode (https://x.com/unclecode) as part of the Crawl4AI project (https://github.com/unclecode/crawl4ai).")

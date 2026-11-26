@@ -39,6 +39,19 @@ public enum GenerationError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// Whether generation is inside a span (a tool call's JSON: from `open` to `close`), to run it exact.
+final class ExactSpan {
+    let open, close: Int32
+    private(set) var inside = false
+    init(open: Int32, close: Int32) {
+        self.open = open
+        self.close = close
+    }
+    func observe(_ token: Int32) {
+        if token == open { inside = true } else if token == close { inside = false }
+    }
+}
+
 /// Closes a thought that ran past `cap` tokens: after `open` (the thinking marker) counts tokens until `close`
 /// (end of message), and once `cap` is reached asks for `close` to be forced.
 final class ThinkingBudget {

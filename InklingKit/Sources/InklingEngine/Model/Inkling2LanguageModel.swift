@@ -59,6 +59,16 @@ public final class Inkling2LanguageModel: CausalLM {
     /// One per MoE layer when experts are streamed.
     var expertCaches: [ExpertCache] { model.layers.compactMap { $0.moe.cache } }
 
+    /// Smart expert picks (`SparseMoE.smartRoute`) for decode steps and checks.
+    var smartRouting: Bool {
+        get { model.layers.first?.moe.smartRouting ?? false }
+        set { for l in model.layers { l.moe.smartRouting = newValue } }
+    }
+    var smartKeepTop: Int {
+        get { model.layers.first?.moe.smartKeepTop ?? 3 }
+        set { for l in model.layers { l.moe.smartKeepTop = newValue } }
+    }
+
     /// Expert use counts per streamed layer, saved between launches.
     struct HeatFile: Codable, Equatable {
         var identity: String

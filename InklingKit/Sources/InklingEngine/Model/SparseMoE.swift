@@ -44,6 +44,30 @@ final class SparseMoE {
         return (indices, weights)
     }
 
+    /// Smart expert picks (cache-aware routing with the top experts guaranteed; Skliar et al., arXiv 2412.00099):
+    /// the router's best `keepTop` experts always run; the other picks come from its best `pickFrom`, those in a slot
+    /// (`resident` [E], 1 = in a slot) first, then the rest by rank. Weights are the router's for what runs,
+    /// renormalised as usual. Swapping only lower-ranked experts barely changes a fine-grained MoE's output, and the
+    /// cache keeps the experts it reuses, so far fewer are read from storage.
+    func smartRoute(_ x: MLXArray, resident: MLXArray, keepTop: Int, pickFrom: Int) -> (MLXArray, MLXArray) {
+        let scores = sigmoid(matmul(x.asType(.float32), gateWeight.asType(.float32).T))
+        let order = argSort(-(scores + scoreBias), axis: -1)
+        let rank = argSort(order, axis: -1).asType(.float32)  // each expert's rank, 0 = best
+        let pool = Float(pickFrom)
+        let key = which(rank .< Float(keepTop), rank - 1e6, which(rank .< pool, rank + (1 - resident) * pool, rank + 1e6))
+        let indices = argPartition(key, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+        var weights = takeAlong(scores, indices, axis: -1)
+        weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20) * routeScale
+        return (indices, weights)
+    }
+
+    /// Smart picks on (decode steps and speculative checks only; prompt chunks stay exact).
+    var smartRouting = false
+    static let smartKeepTopDefault = 3
+    var smartKeepTop = smartKeepTopDefault
+    static let smartPickFrom = 16
+    static let smartMaxTokens = 16
+
     /// `route` compiled (one token's router as a few fused kernels); GPU only.
     private lazy var compiledRoute: (MLXArray) -> (MLXArray, MLXArray) = compile(inputs: [], outputs: []) { [unowned self] x in
         route(x)
@@ -111,7 +135,9 @@ final class SparseMoE {
             turboMisses.append(r[4])
             return experts(x, r[2], r[3], fast: fast)
         }
-        let (indices, weights) = route(x, fast: fast)
+        let smart = smartRouting && cache != nil && !ignoreRouting && x.dim(0) * x.dim(1) <= Self.smartMaxTokens
+        let (indices, weights) = smart ? smartRoute(x, resident: cache!.residentMask(), keepTop: smartKeepTop, pickFrom: Self.smartPickFrom)
+                                       : route(x, fast: fast)
         onRoute?(indices)
         guard let cache else { return experts(x, indices, weights, fast: fast) }
         let (b, length, d) = (x.dim(0), x.dim(1), x.dim(2))
