@@ -60,11 +60,25 @@ public final class Inkling2LanguageModel: CausalLM {
     var expertCaches: [ExpertCache] { model.layers.compactMap { $0.moe.cache } }
 
     /// Turbo: expert picks replaced by a ready expert, and experts read in after a token (totals).
-    private(set) var turboSkipped = 0, turboLoaded = 0, turboPicks = 0
+    private(set) var turboSkipped = 0, turboLoaded = 0, turboPicks = 0, turboRedone = 0
+
+    /// Turbo: [largest, total] share of a visit's routing weight swapped this token (nil: no turbo visit ran).
+    func turboMissed() -> MLXArray? {
+        let all = model.layers.flatMap(\.moe.turboMisses)
+        guard !all.isEmpty else { return nil }
+        let shares = concatenated(all)
+        return stacked([shares.max(), shares.sum()])
+    }
+
+    /// Turbo: the token just run is being redone exact (its routing still counts toward reads).
+    func turboWillRedo() {
+        turboRedone += 1
+        turboBoundary(tables: false)
+    }
 
     /// Turbo, between tokens (no GPU work in flight): reads the last token's routing, counts uses, starts reading the
     /// experts it missed, then gives every streamed layer its table for the next token.
-    func turboBoundary() {
+    func turboBoundary(tables: Bool = true) {
         let moes = model.layers.map(\.moe).filter { $0.cache != nil }
         let routes = moes.flatMap { $0.turboRoutes.flatMap { [$0.wanted, $0.used] } }
         if !routes.isEmpty { eval(routes) }
@@ -76,6 +90,7 @@ public final class Inkling2LanguageModel: CausalLM {
                 used += r.used.asArray(UInt32.self).map(Int.init)
             }
             moe.turboRoutes = []
+            moe.turboMisses = []
             if !wanted.isEmpty {
                 cache.touch(wanted: wanted, used: used)
                 turboPicks += wanted.count
@@ -88,8 +103,12 @@ public final class Inkling2LanguageModel: CausalLM {
                     cache.readIn(distinct, keepReady: moe.topK)
                 }
             }
-            let (slots, ready) = cache.turboTable()
-            moe.turboTable = (MLXArray(slots), MLXArray(ready))
+            if tables {
+                let (slots, ready) = cache.turboTable()
+                moe.turboTable = (MLXArray(slots), MLXArray(ready))
+            } else {
+                moe.turboTable = nil
+            }
         }
     }
 
@@ -98,6 +117,7 @@ public final class Inkling2LanguageModel: CausalLM {
         for l in model.layers {
             l.moe.turboTable = nil
             l.moe.turboRoutes = []
+            l.moe.turboMisses = []
         }
     }
 
@@ -116,8 +136,15 @@ public final class Inkling2LanguageModel: CausalLM {
 
     /// `fast`: single-token steps use the fused MoE kernels. `compiled`: and run each layer's pure parts compiled
     /// (fused elementwise kernels: far fewer GPU dispatches per token).
-    public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?, fast: Bool, compiled: Bool = false) -> MLXArray {
-        let h = model(tokens, cache: cache, fast: fast, compiled: compiled)
+    public func lastLogits(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
+        callAsFunction(tokens, cache: cache, fast: false, lastOnly: true)[0, -1]
+    }
+
+    /// `lastOnly`: the LM head runs on the last position only (logits [B, 1, V]).
+    public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?, fast: Bool, compiled: Bool = false,
+                               lastOnly: Bool = false) -> MLXArray {
+        var h = model(tokens, cache: cache, fast: fast, compiled: compiled)
+        if lastOnly, h.dim(1) > 1 { h = h[0..., (h.dim(1) - 1)..., 0...] }
         // Round through the embedding dtype like the reference, then project in FP32.
         let normed = Ops.rmsNorm(h, weight: model.norm, eps: config.rmsNormEps)
             .asType(model.embedNorm.dtype).asType(.float32)

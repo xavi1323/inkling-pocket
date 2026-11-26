@@ -111,14 +111,35 @@ final class Attention {
         var (k, v) = (p.k, p.v)
         if let cache { (k, v) = cache.updateAndFetch(keys: k, values: v) }
         let size = k.dim(2)
-        var mask = Ops.bandedMask(rel: p.r, proj: relProj.asType(dtype), qOffset: size - length, keys: size,
-                                  sliding: sliding, relExtent: relExtent)
         // The sink is a zero key/value with its own query-dependent logit.
-        mask = concatenated([mask, p.sinks], axis: -1)
         k = concatenated([k, MLXArray.zeros([b, nKV, 1, headDim], dtype: k.dtype)], axis: 2)
         v = concatenated([v, MLXArray.zeros([b, nKV, 1, headDim], dtype: v.dtype)], axis: 2)
-        return Ops.attention(q: p.q, k: k, v: v, scale: Float(1 / sqrt(Double(headDim))), mask: mask)
+        let scale = Float(1 / sqrt(Double(headDim))), proj = relProj.asType(dtype)
+        func block(_ start: Int, _ end: Int) -> MLXArray {
+            let whole = start == 0 && end == length
+            let q = whole ? p.q : p.q[0..., 0..., start..<end, 0...]
+            let r = whole ? p.r : p.r[0..., start..<end]
+            let sinks = whole ? p.sinks : p.sinks[0..., 0..., start..<end]
+            var mask = Ops.bandedMask(rel: r, proj: proj, qOffset: size - length + start, keys: size,
+                                      sliding: sliding, relExtent: relExtent)
+            mask = concatenated([mask, sinks], axis: -1)
+            return Ops.attention(q: q, k: k, v: v, scale: scale, mask: mask)
+        }
+        guard length > Self.queryBlock else { return block(0, length) }
+        // Long chunks: one query block at a time, so the [H, block, keys] mask stays small however long the chunk.
+        Self.queryBlockedCalls += 1
+        var outs: [MLXArray] = []
+        for start in stride(from: 0, to: length, by: Self.queryBlock) {
+            let out = block(start, min(start + Self.queryBlock, length))
+            eval(out)
+            outs.append(out)
+        }
+        return concatenated(outs, axis: 2)
     }
+
+    /// Queries per attention block in prompt chunks (the mask is [heads, block, keys]).
+    nonisolated(unsafe) static var queryBlock = 512
+    nonisolated(unsafe) static var queryBlockedCalls = 0
 
     /// Output gate and projection of `attend`'s result, pure.
     func finish(_ out: MLXArray, gate: MLXArray) -> MLXArray {

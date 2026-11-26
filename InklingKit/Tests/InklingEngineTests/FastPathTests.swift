@@ -190,3 +190,72 @@ final class StepOnlyDifferent: CausalLM {
         #expect(same.top1Agreement == 1)
     }
 }
+
+/// Long prompt chunks attend in query blocks (bounded mask memory); same logits as one block.
+extension FastPathTests {
+    @Test func queryBlockedAttentionMatches() throws {
+        let prompt = (0..<40).map { Int32(($0 * 37 + 11) % 500) }
+        func logits(block: Int) throws -> MLXArray {
+            let saved = Attention.queryBlock
+            Attention.queryBlock = block
+            defer { Attention.queryBlock = saved }
+            let gen = TokenGenerator(model: try Tiny.model(), eos: [])
+            gen.prefillChunk = 40
+            return gen.prefill(prompt).asType(.float32)
+        }
+        let whole = try logits(block: 4096), blocked = try logits(block: 6)
+        #expect(Attention.queryBlockedCalls > 0)
+        #expect(abs(whole - blocked).max().item(Float.self) <= 1e-3 * max(abs(whole).max().item(Float.self), 1))
+    }
+}
+
+/// A prompt chunk's last-position logits, without the LM head over every position.
+extension FastPathTests {
+    @Test func lastLogitsMatchFullLogits() throws {
+        let prompt = MLXArray((0..<12).map { Int32(($0 * 37 + 11) % 500) }).reshaped([1, -1])
+        let model = try Tiny.model()
+        let full = model(prompt, cache: model.makeCache())[0, -1]
+        let last = model.lastLogits(prompt, cache: model.makeCache())
+        #expect(last.shape == full.shape)
+        #expect(abs(full - last).max().item(Float.self) <= 1e-4)
+        let fast = FastPath(model), turbo = TurboPath(model)
+        #expect(abs(fast.lastLogits(prompt, cache: fast.makeCache()) - full).max().item(Float.self) <= 1e-3)
+        #expect(abs(turbo.lastLogits(prompt, cache: turbo.makeCache()) - full).max().item(Float.self) <= 1e-3)
+    }
+}
+
+/// Turbo's guard: a token that had to swap too much routing weight is rewound and run exact. With the limits at
+/// zero every token is redone, so turbo gives exactly the fast path's tokens even with few slots.
+extension FastPathTests {
+    @Test func turboRedoneTokensMatchExact() throws {
+        let prompt = (0..<40).map { Int32(($0 * 37 + 11) % 500) }
+        let saved = (TurboPath.maxVisitMiss, TurboPath.maxTokenMiss)
+        TurboPath.maxVisitMiss = -1
+        TurboPath.maxTokenMiss = -1
+        defer { (TurboPath.maxVisitMiss, TurboPath.maxTokenMiss) = saved }
+        let exact = try ExpertStreamingTests.streamed(slots: 3)
+        let turbo = try ExpertStreamingTests.streamed(slots: 3)
+        let a = TokenGenerator(model: FastPath(exact), eos: [])
+            .generate(prompt: prompt, sampler: Sampler(greedy()), maxTokens: 10, shouldStop: { false }, onToken: { _ in })
+        let b = TokenGenerator(model: TurboPath(turbo), eos: [])
+            .generate(prompt: prompt, sampler: Sampler(greedy()), maxTokens: 10, shouldStop: { false }, onToken: { _ in })
+        #expect(a == b)
+        #expect(turbo.turboRedone == 9)
+    }
+
+    /// A decode step can be undone: rewinding and repeating it gives the same logits (ring wrap included).
+    @Test func decodeStepRewinds() throws {
+        let model = try Tiny.model()
+        let fast = FastPath(model)
+        let cache = fast.makeCache()
+        _ = fast.lastLogits(MLXArray((0..<20).map { Int32($0 * 7 % 500) }).reshaped([1, -1]), cache: cache)
+        for t in [Int32(5), 9, 13] {
+            let points = cache.map { ($0 as! InklingVisitCache).checkpoint() }
+            let first = fast(MLXArray([t]).reshaped([1, 1]), cache: cache)[0, -1]
+            eval(first)
+            for (c, p) in zip(cache, points) { #expect((c as! InklingVisitCache).rewind(to: p)) }
+            let again = fast(MLXArray([t]).reshaped([1, 1]), cache: cache)[0, -1]
+            #expect(abs(first - again).max().item(Float.self) <= 1e-5)
+        }
+    }
+}

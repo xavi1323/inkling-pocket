@@ -82,7 +82,7 @@ public enum SelfTest {
         func stepped(_ model: CausalLM, _ seq: [Int32], _ n: Int) -> MLXArray {
             let cache = model.makeCache()
             let split = seq.count - n + 1
-            var rows = [model(MLXArray(Array(seq[..<split])).reshaped([1, -1]), cache: cache)[0, -1]]
+            var rows = [model.lastLogits(MLXArray(Array(seq[..<split])).reshaped([1, -1]), cache: cache)]
             for token in seq[split...] {
                 let row = model(MLXArray([token]).reshaped([1, 1]), cache: cache)[0, -1]
                 eval(row)

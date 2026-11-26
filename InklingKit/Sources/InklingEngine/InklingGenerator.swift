@@ -98,7 +98,9 @@ public actor InklingGenerator: LanguageModel {
         if expertSlots != nil { generator.prefillChunk = Self.streamingPrefillChunk }
     }
 
-    static let streamingPrefillChunk = 512  // the attention mask for a chunk grows with chunk × context; 512 keeps it ~0.5 GB
+    /// Every chunk reads nearly all experts once, so bigger chunks read less per token; attention runs in 512-query
+    /// blocks (`Attention.queryBlock`), so the mask stays ~0.5 GB.
+    static let streamingPrefillChunk = 2048
 
     /// Share of expert lookups already in a slot (nil when not streaming).
     var expertHitRate: Double? {

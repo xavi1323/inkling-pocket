@@ -82,6 +82,26 @@ public final class InklingVisitCache: LayerVisitCache {
 
     /// Bytes held by K/V buffers (for the Benchmark screen).
     public var bytes: Int { kv.bytes }
+
+    /// Before a single-token step: what `rewind` needs to undo it (no buffer copies).
+    struct Checkpoint {
+        let offset: Int
+        let conv: ConvStateCache
+    }
+
+    func checkpoint() -> Checkpoint { Checkpoint(offset: kv.offset, conv: convState) }
+
+    /// Whether the step after `p` can be undone (exactly one token written since).
+    func canRewind(to p: Checkpoint) -> Bool { kv.offset == p.offset + 1 }
+
+    /// Undoes the single-token step after `p`; false (nothing changed) when it is not exactly one step back.
+    @discardableResult
+    func rewind(to p: Checkpoint) -> Bool {
+        guard canRewind(to: p) else { return false }
+        kv.rewindOne()
+        convState = p.conv
+        return true
+    }
 }
 
 protocol KVStore: AnyObject {
@@ -91,6 +111,8 @@ protocol KVStore: AnyObject {
     func updateForDecode(keys: MLXArray, values: MLXArray) -> DecodeKV
     func snapshot() -> KVSnapshot
     func restore(_ s: KVSnapshot)
+    /// Forgets the last single-token write (the next write goes where it went).
+    func rewindOne()
     /// The K/V a snapshot stands for, as standalone arrays (for saving to disk).
     func export(_ s: KVSnapshot) -> KVSnapshot
     /// Replaces the contents with exported K/V.

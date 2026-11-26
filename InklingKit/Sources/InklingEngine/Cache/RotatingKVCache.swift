@@ -89,6 +89,13 @@ final class RotatingKVCache: KVStore {
         KVSnapshot(keys: keys.map { $0[0...] }, values: values.map { $0[0...] }, offset: offset, index: index)
     }
 
+    /// The last write went to slot `index - 1` (after any growth or trim), and the entry it replaced lies outside the
+    /// window of the token that will be written there again.
+    func rewindOne() {
+        offset -= 1
+        index -= 1
+    }
+
     func restore(_ s: KVSnapshot) {
         keys = s.keys
         values = s.values

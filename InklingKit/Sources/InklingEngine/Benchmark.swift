@@ -155,7 +155,7 @@ extension InklingGenerator {
         gen.pipelined = generator.pipelined
         let profile = (reference as? Inkling2LanguageModel)?.profile
         let before = profile?.snapshot
-        let lmBefore = (reference as? Inkling2LanguageModel).map { ($0.turboSkipped, $0.turboPicks) }
+        let lmBefore = (reference as? Inkling2LanguageModel).map { ($0.turboSkipped, $0.turboPicks, $0.turboRedone) }
         var afterPrefill: StreamProfile.Snapshot?
         gen.afterStep = { _ in if afterPrefill == nil { afterPrefill = profile?.snapshot } }
         try withError {
@@ -176,10 +176,12 @@ extension InklingGenerator {
         report.thermalState = MemoryInfo.thermalState()
         report.expertHitRate = expertHitRate
         report.expertSlots = expertSlots
-        if model is TurboPath, let lm = reference as? Inkling2LanguageModel, let (s0, p0) = lmBefore, lm.turboPicks > p0 {
+        if model is TurboPath, let lm = reference as? Inkling2LanguageModel, let (s0, p0, r0) = lmBefore, lm.turboPicks > p0 {
             let skipped = lm.turboSkipped - s0, picks = lm.turboPicks - p0
-            report.turboSwaps = String(format: "%.1f%% of expert picks ran a ready expert instead (%.1f per token)",
-                                       Double(skipped) / Double(picks) * 100, Double(skipped) / Double(max(gen.stats.generatedTokens - 1, 1)))
+            let steps = Double(max(gen.stats.generatedTokens - 1, 1))
+            report.turboSwaps = String(format: "%.1f%% of expert picks ran a ready expert instead (%.1f per token), %.0f%% of tokens redone exact",
+                                       Double(skipped) / Double(picks) * 100, Double(skipped) / steps,
+                                       Double(lm.turboRedone - r0) / steps * 100)
         }
         if let profile, let before, let afterPrefill {
             let prefillSeconds = gen.stats.prefillTokensPerSecond > 0 ? Double(gen.stats.prefilledTokens) / gen.stats.prefillTokensPerSecond : 0

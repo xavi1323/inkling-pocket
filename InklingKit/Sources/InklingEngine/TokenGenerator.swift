@@ -5,6 +5,12 @@ import MLX
 public protocol CausalLM: AnyObject {
     func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray
     func makeCache() -> [LayerVisitCache]
+    /// Logits [V] of the last position only (a prompt chunk needs no others).
+    func lastLogits(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray
+}
+
+public extension CausalLM {
+    func lastLogits(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray { self(tokens, cache: cache)[0, -1] }
 }
 
 public struct GenerationStats: Sendable, Equatable {
@@ -88,8 +94,7 @@ public final class TokenGenerator {
         while i < prompt.count {
             var end = min(i + prefillChunk, prompt.count)
             if keepPrefix, i < stablePrefix { end = min(end, stablePrefix) }
-            let out = model(MLXArray(Array(prompt[i..<end])).reshaped([1, -1]), cache: cache)
-            logits = out[0, -1]
+            logits = model.lastLogits(MLXArray(Array(prompt[i..<end])).reshaped([1, -1]), cache: cache)
             eval(logits!)
             i = end
             if keepPrefix, i == stablePrefix {

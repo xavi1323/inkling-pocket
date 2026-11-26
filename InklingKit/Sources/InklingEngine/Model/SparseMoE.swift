@@ -63,9 +63,12 @@ final class SparseMoE {
     var turboTable: (slots: MLXArray, ready: MLXArray)?
     /// Turbo: (wanted, used) experts of each visit this token, read back between tokens.
     var turboRoutes: [(wanted: MLXArray, used: MLXArray)] = []
+    /// Turbo: share of each visit's routing weight that went to swapped experts this token ([1] each).
+    var turboMisses: [MLXArray] = []
 
-    /// Turbo router: [wanted ids, used ids, their slots, weights]. Experts not ready are replaced by the best ready
-    /// ones; weights are renormalised over what runs (a missing expert gets weight 0).
+    /// Turbo router: [wanted ids, used ids, their slots, weights, missed share]. Experts not ready are replaced by the
+    /// best ready ones; weights are renormalised over what runs (a missing expert gets weight 0). Missed share: the
+    /// part of the wanted experts' routing weight that was not ready.
     func turboRoute(_ a: [MLXArray]) -> [MLXArray] {
         let (x, slots, ready) = (a[0], a[1], a[2])
         let scores = sigmoid(matmul(x.asType(.float32), gateWeight.asType(.float32).T))
@@ -74,7 +77,9 @@ final class SparseMoE {
         let used = argPartition(-(selection + (ready - 1) * 1e9), kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
         var weights = takeAlong(scores * ready, used, axis: -1)
         weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20) * routeScale
-        return [wanted, used, take(slots, used), weights]
+        let want = takeAlong(scores, wanted, axis: -1)
+        let missed = (want * (1 - take(ready, wanted))).sum() / (want.sum() + 1e-20)
+        return [wanted, used, take(slots, used), weights, missed.reshaped([1])]
     }
 
     private lazy var compiledTurbo: ([MLXArray]) -> [MLXArray] = compile(inputs: [], outputs: []) { [unowned self] a in
@@ -103,6 +108,7 @@ final class SparseMoE {
             let r = fast && Ops.useFused ? compiledTurbo(inputs) : turboRoute(inputs)
             onRoute?(r[1])
             turboRoutes.append((r[0], r[1]))
+            turboMisses.append(r[4])
             return experts(x, r[2], r[3], fast: fast)
         }
         let (indices, weights) = route(x, fast: fast)

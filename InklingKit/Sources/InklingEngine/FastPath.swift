@@ -10,5 +10,9 @@ public final class FastPath: CausalLM {
         base(tokens, cache: cache, fast: true, compiled: true)
     }
 
+    public func lastLogits(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
+        base(tokens, cache: cache, fast: true, compiled: true, lastOnly: true)[0, -1]
+    }
+
     public func makeCache() -> [LayerVisitCache] { base.makeCache() }
 }
