@@ -39,10 +39,11 @@ final class ModelLocation {
         defaults.set(try url.bookmarkData(), forKey: Self.bookmarkKey)
     }
 
-    /// Copy into app storage; clears any in-place bookmark when done.
+    /// Copy into app storage with weights repacked for zero-copy loading; clears any in-place bookmark.
     func copyIn(_ url: URL, progress: @escaping @Sendable (Double) -> Void) async throws {
         try FileManager.default.createDirectory(at: URL.applicationSupportDirectory, withIntermediateDirectories: true)
-        try await ModelCopier.copy(from: url, to: Self.copiedFolder, progress: progress)
+        let manifest = try ModelFolder.validate(url)
+        try await ModelImporter.importModel(manifest, to: Self.copiedFolder, progress: progress)
         defaults.removeObject(forKey: Self.bookmarkKey)
     }
 

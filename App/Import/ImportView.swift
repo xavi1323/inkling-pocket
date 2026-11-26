@@ -31,7 +31,7 @@ struct ImportView: View {
                     Button("Cancel", role: .cancel) { copyTask?.cancel() }
                 }
             } else {
-                Toggle("Use the folder where it is (don't copy 12 GB)", isOn: $settings.keepModelInPlace)
+                Toggle("Use the folder where it is (slower, uses more memory)", isOn: $settings.keepModelInPlace)
                     .frame(maxWidth: 420)
                 Button("Choose Folder…") { picking = true }
                     .buttonStyle(.borderedProminent)
