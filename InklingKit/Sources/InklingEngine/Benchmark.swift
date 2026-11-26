@@ -27,6 +27,9 @@ public struct BenchmarkReport: Sendable, Equatable {
     public var thermalState = "unknown"
     public var routing = ""
     public var passOverlap = ""
+    /// Where streaming time went (empty when not streaming).
+    public var prefillProfile = ""
+    public var decodeProfile = ""
     public init() {}
 
     public var asText: String {
@@ -44,6 +47,8 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Expert hit rate: \(expertHitRate.map { String(format: "%.1f%%", $0 * 100) } ?? "n/a (not streaming)")",
             "Expert slots per layer: \(expertSlots.map { "\($0.min() ?? 0)–\($0.max() ?? 0) (\($0.reduce(0, +)) total)" } ?? "all (not streaming)")",
             "Thermal: \(thermalState)",
+            "Prefill time (whole prompt): \(prefillProfile.isEmpty ? "n/a" : prefillProfile)",
+            "Decode time per token: \(decodeProfile.isEmpty ? "n/a" : decodeProfile)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
             "Routing:",
             routing,
@@ -107,6 +112,10 @@ extension InklingGenerator {
         progress("Prefill \(tokens.count) tokens, decode \(decodeTokens)…")
         let gen = TokenGenerator(model: model, eos: [])
         gen.pipelined = generator.pipelined
+        let profile = (reference as? Inkling2LanguageModel)?.profile
+        let before = profile?.snapshot
+        var afterPrefill: StreamProfile.Snapshot?
+        gen.afterStep = { _ in if afterPrefill == nil { afterPrefill = profile?.snapshot } }
         try withError {
             gen.generate(prompt: tokens, sampler: Sampler(greedy), maxTokens: decodeTokens, shouldStop: { Task.isCancelled }, onToken: { _ in })
         }
@@ -125,6 +134,13 @@ extension InklingGenerator {
         report.thermalState = MemoryInfo.thermalState()
         report.expertHitRate = expertHitRate
         report.expertSlots = expertSlots
+        if let profile, let before, let afterPrefill {
+            let prefillSeconds = gen.stats.prefillTokensPerSecond > 0 ? Double(gen.stats.prefilledTokens) / gen.stats.prefillTokensPerSecond : 0
+            report.prefillProfile = (afterPrefill - before).summary(tokens: 1, seconds: prefillSeconds)
+            let steps = max(gen.stats.generatedTokens - 1, 1)
+            let decodeSeconds = gen.stats.decodeTokensPerSecond > 0 ? Double(steps) / gen.stats.decodeTokensPerSecond : 0
+            report.decodeProfile = (profile.snapshot - afterPrefill).summary(tokens: steps, seconds: decodeSeconds)
+        }
         if let lm = reference as? Inkling2LanguageModel {
             progress("Recording expert routing…")
             let stats = RoutingStats(visits: lm.config.layerVisits, numExperts: lm.config.numExperts)

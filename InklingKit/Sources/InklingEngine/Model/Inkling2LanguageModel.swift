@@ -25,7 +25,13 @@ public final class Inkling2LanguageModel: CausalLM {
         self.config = config
         model = try TextModel(config, loader: loader)
         lmHead = try loader.linear("lm_head")
+        let caches = model.layers.compactMap { $0.moe.cache }
+        profile = caches.isEmpty ? nil : StreamProfile()
+        for c in caches { c.profile = profile }
     }
+
+    /// Streaming time and reads, shared by every layer's cache (nil when experts are not streamed).
+    let profile: StreamProfile?
 
     /// `expertSlots`: stream experts through that many slots per layer instead of handing MLX the mapped tensors.
     public static func load(config: InklingModelConfig, weights: WeightSource, expertSlots: Int) throws -> Inkling2LanguageModel {

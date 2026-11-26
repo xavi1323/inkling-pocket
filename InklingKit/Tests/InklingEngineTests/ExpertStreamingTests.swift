@@ -94,6 +94,31 @@ import InklingCore
         #expect(big[1] == 128 && big[0] == 72)
     }
 
+    /// Long chunks run experts in slot-sized groups: the ones already in a slot go first, so no group evicts an
+    /// expert a later group needs.
+    @Test func groupsStartWithResidentExperts() throws {
+        let weights = try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")])
+        let cache = try ExpertCache(path: "model.layers.0.mlp", weights: weights, quant: try Tiny.config().quantization,
+                                    prefix: "language_model.", slots: 3)
+        _ = cache.ensure([0, 1])
+        #expect(cache.residentFirst([4, 1, 5, 0]) == [1, 0, 4, 5])
+    }
+
+    /// The benchmark's time breakdown counts every expert read.
+    @Test func profileCountsReads() throws {
+        let model = try Self.streamed(slots: 3)
+        let gen = TokenGenerator(model: model, eos: [])
+        gen.prefillChunk = 1
+        gen.prefill(tokens)
+        let p = try #require(model.profile).snapshot
+        let caches = model.expertCaches
+        #expect(p.misses == caches.map(\.misses).reduce(0, +))
+        #expect(p.prefetched == caches.map(\.prefetched).reduce(0, +))
+        #expect(p.prefetchUsed <= p.prefetched)
+        #expect(p.readBytes > 0 && p.gpuWait > 0 && p.expertWait > 0)
+        #expect(p.summary(tokens: 40, seconds: 1).contains("misses"))
+    }
+
     @Test func streamedModelHoldsOnlySlots() throws {
         let model = try Self.streamed(slots: 3)
         let slotsPerLayer = model.expertCaches.map { $0.down.weight.dim(0) }

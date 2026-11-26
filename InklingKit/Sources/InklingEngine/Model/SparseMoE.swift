@@ -61,12 +61,14 @@ final class SparseMoE {
         // while the GPU works. Safe: everything queued before reading the routing back has finished, and the work
         // queued after it only reads this layer's slots.
         let guess = b * length == 1 && next?.cache != nil ? next!.route(x).0 : nil
-        eval([indices] + (guess.map { [$0] } ?? []))
+        let waited = [indices] + (guess.map { [$0] } ?? [])
+        if let profile = cache.profile { profile.time(\.gpuWait) { eval(waited) } } else { eval(waited) }
         let ids = indices.asArray(Int32.self)
         if let guess, let nextCache = next?.cache { nextCache.prefetch(guess.asArray(Int32.self).map(Int.init)) }
         var unique: [Int] = []
         var seen = Set<Int>()
         for id in ids where seen.insert(Int(id)).inserted { unique.append(Int(id)) }
+        if unique.count > cache.slots { unique = cache.residentFirst(unique) }  // the first group then reads nothing
         if unique.count <= cache.slots {
             let map = cache.ensure(unique)
             let out = experts(x, MLXArray(ids.map { map[Int($0)]! }).reshaped(indices.shape), weights, fast: fast)

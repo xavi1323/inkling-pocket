@@ -44,6 +44,10 @@ final class ExpertCache: @unchecked Sendable {
     private(set) var misses = 0
     /// Experts read ahead by `prefetch`.
     private(set) var prefetched = 0
+    /// Read-ahead experts not used yet (a later hit on one counts as a useful read-ahead).
+    private var unusedPrefetch = Set<Int>()
+    /// Shared by the model's caches; nil = not measured.
+    var profile: StreamProfile?
     /// Serialises slot changes: `ensure` (generation thread) and `prefetch` (background).
     private let queue = DispatchQueue(label: "inkling.expert-cache", qos: .userInitiated)
 
@@ -141,7 +145,14 @@ final class ExpertCache: @unchecked Sendable {
     /// Waits for a running `prefetch` first.
     func ensure(_ experts: [Int]) -> [Int: Int32] {
         precondition(Set(experts).count <= slots, "more experts than slots")
-        return queue.sync { fill(experts, counting: true) }
+        guard let profile else { return queue.sync { fill(experts, counting: true) } }
+        return profile.time(\.expertWait) { queue.sync { fill(experts, counting: true) } }
+    }
+
+    /// `experts` reordered so those already in a slot come first: running them in slot-sized groups in this order
+    /// reads each missing expert once and never evicts one a later group needs.
+    func residentFirst(_ experts: [Int]) -> [Int] {
+        queue.sync { experts.filter { slotOf[$0] != nil } + experts.filter { slotOf[$0] == nil } }
     }
 
     /// Reads experts in the background (a guess at what the next step needs). Only call while no queued GPU work
@@ -163,7 +174,10 @@ final class ExpertCache: @unchecked Sendable {
             if let s = slotOf[e] {
                 lastUse[s] = clock
                 map[e] = Int32(s)
-                if counting { hits += 1 }
+                if counting {
+                    hits += 1
+                    if unusedPrefetch.remove(e) != nil { profile?.update { $0.prefetchUsed += 1 } }
+                }
             } else if !missing.contains(e) {
                 missing.append(e)
             }
@@ -175,7 +189,11 @@ final class ExpertCache: @unchecked Sendable {
         }
         var jobs: [(expert: Int, slot: Int)] = []
         for (e, s) in zip(missing, free) {
-            if let old = expertIn[s] { slotOf[old] = nil }
+            if let old = expertIn[s] {
+                slotOf[old] = nil
+                unusedPrefetch.remove(old)
+            }
+            if !counting { unusedPrefetch.insert(e) }
             expertIn[s] = e
             slotOf[e] = s
             lastUse[s] = clock
@@ -184,9 +202,18 @@ final class ExpertCache: @unchecked Sendable {
         }
         if counting { misses += jobs.count } else { prefetched += jobs.count }
         let parts = self.parts, copies = jobs
+        let start = StreamProfile.now()
         DispatchQueue.concurrentPerform(iterations: jobs.count * parts.count) { i in
             let job = copies[i / parts.count], part = parts[i % parts.count]
             Self.load(part, expert: job.expert, slot: job.slot)
+        }
+        if let profile {
+            let elapsed = StreamProfile.now() - start, bytes = Int64(jobs.count * parts.map(\.stride).reduce(0, +))
+            profile.update {
+                if counting { $0.misses += jobs.count } else { $0.prefetched += jobs.count }
+                $0.readBytes += bytes
+                $0.readTime += elapsed
+            }
         }
         return map
     }
