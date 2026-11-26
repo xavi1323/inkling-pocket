@@ -270,13 +270,19 @@ final class ExpertCache: @unchecked Sendable {
 
     /// Reads experts in the background (a guess at what the next step needs). Only call while no queued GPU work
     /// reads this layer's slots. Skipped when there are not enough free slots.
+    /// `experts` are ranked best guess first; ranks that rarely pay off are skipped (`StreamProfile.shouldPrefetch`).
+    /// Reads run at lower I/O priority than the reads a step is waiting on.
     func prefetch(_ experts: [Int]) {
         guard Set(experts).count <= slots else { return }
+        var ranks: [Int: Int] = [:]
+        for (rank, e) in experts.enumerated() where ranks[e] == nil && (profile?.shouldPrefetch(rank: rank) ?? true) { ranks[e] = rank }
+        guard !ranks.isEmpty else { return }
+        let ranked = ranks, wanted = experts.filter { ranks[$0] != nil }
         let delay = readDelay, group = DispatchGroup()
         group.enter()
         queue.async { [self] in
-            guard let r = reserve(experts, counting: false, group: group), !r.jobs.isEmpty else { group.leave(); return }
-            DispatchQueue.global(qos: .userInitiated).async { [self] in
+            guard let r = reserve(wanted, counting: false, group: group, ranks: ranked), !r.jobs.isEmpty else { group.leave(); return }
+            DispatchQueue.global(qos: .utility).async { [self] in
                 read(r.jobs, counting: false, delay: delay)
                 queue.sync { finish(r.jobs, group: group) }
                 group.leave()
@@ -299,7 +305,7 @@ final class ExpertCache: @unchecked Sendable {
     /// On `queue`: maps `experts` to slots, claiming the least-used free slots for missing ones (marked loading
     /// under `group`). A step (`counting`) may take a slot a read-ahead is still filling (it waits for that read
     /// first); a read-ahead never does. Nil, changing nothing, when too few slots are free.
-    private func reserve(_ experts: [Int], counting: Bool, group: DispatchGroup) -> Reservation? {
+    private func reserve(_ experts: [Int], counting: Bool, group: DispatchGroup, ranks: [Int: Int] = [:]) -> Reservation? {
         var map: [Int: Int32] = [:]
         var missing: [Int] = []
         for e in experts where map[e] == nil {
@@ -338,7 +344,7 @@ final class ExpertCache: @unchecked Sendable {
                 unusedPrefetch.removeValue(forKey: old)
             }
             if !counting {
-                let rank = experts.firstIndex(of: e) ?? 0
+                let rank = ranks[e] ?? experts.firstIndex(of: e) ?? 0
                 unusedPrefetch[e] = rank
                 if rank < StreamProfile.ranks { profile?.update { $0.prefetchedByRank[rank] += 1 } }
             }

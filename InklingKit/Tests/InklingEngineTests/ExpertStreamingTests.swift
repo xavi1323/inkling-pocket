@@ -212,6 +212,20 @@ import InklingCore
 
 }
 
+/// Read-ahead learns which guess ranks pay off: a rank that is rarely used is skipped (but still tried now and then,
+/// so it can come back); a rank with few samples is always read.
+@Test func readAheadSkipsRanksThatRarelyHit() {
+    let profile = StreamProfile()
+    profile.update {
+        $0.prefetchedByRank[0] = 100; $0.usedByRank[0] = 80
+        $0.prefetchedByRank[7] = 100; $0.usedByRank[7] = 10
+        $0.prefetchedByRank[3] = 5; $0.usedByRank[3] = 0
+    }
+    #expect((0..<16).allSatisfy { _ in profile.shouldPrefetch(rank: 0) })
+    #expect((0..<16).allSatisfy { _ in profile.shouldPrefetch(rank: 3) })
+    #expect((0..<16).filter { _ in profile.shouldPrefetch(rank: 7) }.count == 2)
+}
+
 /// iRAM+ lifts the per-app limit, so `os_proc_available_memory` can report most of RAM; the iPad then runs out
 /// system-wide (jetsam log: app at 9.9 GB of 11.6 GB). The budget is capped by physical memory.
 @Test func budgetIsCappedByPhysicalMemory() {

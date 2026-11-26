@@ -27,6 +27,21 @@ final class StreamProfile: @unchecked Sendable {
     static let ranks = 8
     private let lock = NSLock()
     private var s = Snapshot()
+    private var skipped = Array(repeating: 0, count: StreamProfile.ranks)
+
+    /// Read-ahead of a guess rank pays only when it is used often: a wasted read takes storage time the reads a step
+    /// waits on need. Ranks under `minUseRate` (after `minSamples` reads) are read only every `exploreEvery`-th time.
+    static let minUseRate = 0.4, minSamples = 32, exploreEvery = 8
+
+    func shouldPrefetch(rank: Int) -> Bool {
+        guard rank < Self.ranks else { return false }
+        return lock.withLock {
+            let read = s.prefetchedByRank[rank]
+            if read < Self.minSamples || Double(s.usedByRank[rank]) >= Self.minUseRate * Double(read) { return true }
+            skipped[rank] += 1
+            return skipped[rank] % Self.exploreEvery == 0
+        }
+    }
 
     var snapshot: Snapshot { lock.withLock { s } }
     func update(_ change: (inout Snapshot) -> Void) { lock.withLock { change(&s) } }

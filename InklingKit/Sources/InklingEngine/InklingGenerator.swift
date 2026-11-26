@@ -22,7 +22,8 @@ public actor InklingGenerator: LanguageModel {
     /// Mapped bytes that are not expert weights.
     let nonExpertBytes: Int64
     /// Working memory kept free for the KV cache, activations and Metal scratch on top of `MemoryBudget`'s margin.
-    static let workingReserve: Int64 = 800_000_000
+    /// Peak use stayed ~1 GB under the budget with 0.8 GB here; 0.5 GB still covers a long chat's K/V.
+    static let workingReserve: Int64 = 500_000_000
     static let mlxCacheLimit = 256 << 20
 
     /// Gives memory freed by a dropped engine back to iOS (call after releasing the old engine, before loading).
