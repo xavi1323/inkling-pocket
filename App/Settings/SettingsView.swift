@@ -44,6 +44,11 @@ struct SettingsView: View {
             } footer: {
                 Text("Reference is slower but simple; use it to check answers if the fast engine looks wrong.")
             }
+            Section("About") {
+                Text("Built on mlx-swift, mlx-vlm, OpenUI, SwiftSoup and html2text. This product includes software developed by UncleCode (https://x.com/unclecode) as part of the Crawl4AI project (https://github.com/unclecode/crawl4ai).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
         .navigationTitle("Settings")
     }
