@@ -214,21 +214,6 @@ final class ExpertCache: @unchecked Sendable {
     }
 
     /// Reads one expert's bytes of `part` into `slot` (falls back to copying from the mapping).
-    private static func load(_ part: Part, expert: Int, slot: Int) {
-        let destination = part.destination + slot * part.stride
-        var done = 0
-        if part.fd >= 0 {
-            while done < part.stride {
-                let n = pread(part.fd, destination + done, part.stride - done, off_t(part.offset) + off_t(expert * part.stride + done))
-                if n <= 0 { break }
-                done += n
-            }
-        }
-        if done < part.stride {
-            memcpy(destination + done, part.source + expert * part.stride + done, part.stride - done)
-        }
-    }
-
     static func contiguousStrides(_ shape: [Int]) -> [Int] {
         var strides = Array(repeating: 1, count: shape.count)
         for i in stride(from: shape.count - 2, through: 0, by: -1) { strides[i] = strides[i + 1] * shape[i + 1] }
@@ -437,10 +422,15 @@ final class ExpertCache: @unchecked Sendable {
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         let parts = self.parts
         let start = StreamProfile.now()
-        DispatchQueue.concurrentPerform(iterations: jobs.count * parts.count) { i in
-            let job = jobs[i / parts.count], part = parts[i % parts.count]
-            Self.load(part, expert: job.expert, slot: job.slot)
+        var pieces: [ExpertReader.Piece] = []
+        for job in jobs {
+            for part in parts {
+                pieces += ExpertReader.pieces(fd: part.fd, offset: part.offset + Int64(job.expert * part.stride),
+                                              length: part.stride, destination: part.destination + job.slot * part.stride,
+                                              fallback: part.source + job.expert * part.stride)
+            }
         }
+        ExpertReader.shared.read(pieces, urgent: counting)
         if let profile {
             let elapsed = StreamProfile.now() - start, bytes = Int64(jobs.count * parts.map(\.stride).reduce(0, +))
             profile.update {

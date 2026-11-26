@@ -353,3 +353,26 @@ extension FastPathTests {
         cache.waitForLoads()
     }
 }
+
+/// The shared read pool copies every piece exactly, with many callers at once and both priorities.
+@Test func expertReaderReadsEveryPiece() throws {
+    let size = 5 << 20 + 12345
+    let bytes = (0..<size).map { UInt8(truncatingIfNeeded: $0 &* 2654435761 >> 13) }
+    let url = FileManager.default.temporaryDirectory.appending(path: "reader-\(UUID().uuidString).bin")
+    try Data(bytes).write(to: url)
+    defer { try? FileManager.default.removeItem(at: url) }
+    let fd = open(url.path, O_RDONLY)
+    defer { close(fd) }
+    try bytes.withUnsafeBytes { source in
+        let destination = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16384)
+        defer { destination.deallocate() }
+        memset(destination, 0, size)
+        let pieces = ExpertReader.pieces(fd: fd, offset: 0, length: size, destination: destination, fallback: source.baseAddress!)
+        #expect(pieces.count == (size + ExpertReader.pieceSize - 1) / ExpertReader.pieceSize)
+        let half = pieces.count / 2
+        DispatchQueue.concurrentPerform(iterations: 2) { i in
+            ExpertReader.shared.read(i == 0 ? Array(pieces[..<half]) : Array(pieces[half...]), urgent: i == 0)
+        }
+        #expect(memcmp(destination, source.baseAddress!, size) == 0)
+    }
+}
