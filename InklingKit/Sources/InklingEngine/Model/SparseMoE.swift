@@ -44,6 +44,16 @@ final class SparseMoE {
         return (indices, weights)
     }
 
+    /// `route` compiled (one token's router as a few fused kernels); GPU only.
+    private lazy var compiledRoute: (MLXArray) -> (MLXArray, MLXArray) = compile(inputs: [], outputs: []) { [unowned self] x in
+        route(x)
+    }
+
+    /// The router for this step: compiled for single tokens on the fast path.
+    func route(_ x: MLXArray, fast: Bool) -> (MLXArray, MLXArray) {
+        fast && Ops.useFused && x.dim(0) * x.dim(1) == 1 ? compiledRoute(x) : route(x)
+    }
+
     func activation(up: MLXArray, gate: MLXArray) -> MLXArray {
         let g = gate.asType(.float32), u = up.asType(.float32)
         return (tanh(g / gateCap) * gateCap * sigmoid(g) * tanh(u / upCap) * upCap).asType(gate.dtype)
@@ -56,7 +66,7 @@ final class SparseMoE {
     var ignoreRouting = false
 
     func callAsFunction(_ x: MLXArray, onRoute: ((MLXArray) -> Void)? = nil, fast: Bool = false) -> MLXArray {
-        let (indices, weights) = route(x)
+        let (indices, weights) = route(x, fast: fast)
         onRoute?(indices)
         guard let cache else { return experts(x, indices, weights, fast: fast) }
         let (b, length, d) = (x.dim(0), x.dim(1), x.dim(2))
@@ -68,7 +78,7 @@ final class SparseMoE {
         // Single token: guess the next visit's experts from this input (its router on our input) and read them in
         // while the GPU works. Safe: everything queued before reading the routing back has finished, and the work
         // queued after it only reads this layer's slots.
-        let guess = b * length == 1 && next?.cache != nil ? next!.route(x).0 : nil
+        let guess = b * length == 1 && next?.cache != nil ? next!.route(x, fast: fast).0 : nil
         let waited = [indices] + (guess.map { [$0] } ?? [])
         if let profile = cache.profile { profile.time(\.gpuWait) { eval(waited) } } else { eval(waited) }
         let ids = indices.asArray(Int32.self)

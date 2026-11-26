@@ -7,7 +7,7 @@ public final class FastPath: CausalLM {
     public init(_ base: Inkling2LanguageModel) { self.base = base }
 
     public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
-        base(tokens, cache: cache, fast: true)
+        base(tokens, cache: cache, fast: true, compiled: true)
     }
 
     public func makeCache() -> [LayerVisitCache] { base.makeCache() }

@@ -7,6 +7,9 @@ final class FusedMoEDecode {
     let gate, up, down: QLinear
     let gateCap, upCap: Float
 
+    /// Softcaps as one array, made once (not copied to the GPU every step).
+    private lazy var caps = MLXArray([gateCap, upCap])
+
     init(gate: QLinear, up: QLinear, down: QLinear, gateCap: Float, upCap: Float) {
         self.gate = gate; self.up = up; self.down = down
         self.gateCap = gateCap; self.upCap = upCap
@@ -34,7 +37,7 @@ final class FusedMoEDecode {
     func kernel(_ x: MLXArray, _ ids: MLXArray, _ w: MLXArray) -> MLXArray {
         #if canImport(Metal)
         let d = x.dim(0), i = gate.weight.dim(1), k = ids.dim(0)
-        let caps = MLXArray([gateCap, upCap])
+        let caps = self.caps
         let h = Self.gateUpKernel(
             [x, ids, gate.weight, gate.scales!, gate.biases!, up.weight, up.scales!, up.biases!, caps],
             template: [("T", x.dtype), ("D", d), ("I", i), ("GB", gate.bits), ("GG", gate.groupSize),

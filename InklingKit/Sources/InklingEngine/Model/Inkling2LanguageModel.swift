@@ -69,9 +69,10 @@ public final class Inkling2LanguageModel: CausalLM {
         callAsFunction(tokens, cache: cache, fast: false)
     }
 
-    /// `fast`: single-token steps use the fused MoE kernels.
-    public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?, fast: Bool) -> MLXArray {
-        let h = model(tokens, cache: cache, fast: fast)
+    /// `fast`: single-token steps use the fused MoE kernels. `compiled`: and run each layer's pure parts compiled
+    /// (fused elementwise kernels: far fewer GPU dispatches per token).
+    public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?, fast: Bool, compiled: Bool = false) -> MLXArray {
+        let h = model(tokens, cache: cache, fast: fast, compiled: compiled)
         // Round through the embedding dtype like the reference, then project in FP32.
         let normed = Ops.rmsNorm(h, weight: model.norm, eps: config.rmsNormEps)
             .asType(model.embedNorm.dtype).asType(.float32)

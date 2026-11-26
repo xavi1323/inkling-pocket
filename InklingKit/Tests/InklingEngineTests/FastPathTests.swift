@@ -66,6 +66,29 @@ import Metal
         }
     }
 
+    /// Single-token steps through the compiled layer blocks (fewer, fused GPU kernels) give the reference logits.
+    @Test func compiledStepsMatchReference() throws {
+        DecoderLayer.splitOnCPU = true
+        compile(enable: false)  // traced, not fused: no CPU JIT here (the iPad Self-test checks the fused kernels)
+        defer {
+            DecoderLayer.splitOnCPU = false
+            compile(enable: true)
+        }
+        let model = try Tiny.model()
+        let refCache = model.makeCache(), compiledCache = model.makeCache()
+        let prompt = MLXArray(tokens.prefix(5)).reshaped([1, -1])
+        _ = model(prompt, cache: refCache)
+        _ = model(prompt, cache: compiledCache)
+        for token in tokens.dropFirst(5) {
+            let t = MLXArray([token]).reshaped([1, 1])
+            let a = model(t, cache: refCache)[0, -1]
+            let b = model(t, cache: compiledCache, fast: false, compiled: true)[0, -1]
+            let scale = max(abs(a).max().item(Float.self), 1)
+            #expect(abs(a - b).max().item(Float.self) <= 1e-3 * scale, "\(token): \(abs(a - b).max().item(Float.self))")
+        }
+        #expect(model.model.layers.allSatisfy { $0.compiledSteps > 0 })
+    }
+
     @Test func gpuSamplerGreedyEqualsArgmax() {
         let logits = MLXRandom.normal([1, 1, 500], key: MLXRandom.key(4))
         let token = GPUSampler(Sampler(greedy())).sample(logits, history: nil)

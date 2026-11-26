@@ -32,7 +32,7 @@ final class TextModel {
     }
 
     /// Hidden state before the final norm, [B, L, D] FP32.
-    func callAsFunction(_ inputs: MLXArray, cache: [LayerVisitCache]?, fast: Bool = false) -> MLXArray {
+    func callAsFunction(_ inputs: MLXArray, cache: [LayerVisitCache]?, fast: Bool = false, compiled: Bool = false) -> MLXArray {
         var x = embed(inputs)
         var blocks: [MLXArray] = []
         var bank: MLXArray?
@@ -65,7 +65,7 @@ final class TextModel {
                 }
             }
             layers[index].moe.next = visit + 1 < visits.count ? layers[visits[visit + 1]].moe : nil
-            x = layers[index](x, blocks: &blocks, cache: cache?[visit], messages: messages, onRoute: onRoute, fast: fast)
+            x = layers[index](x, blocks: &blocks, cache: cache?[visit], messages: messages, onRoute: onRoute, fast: fast, compiled: compiled)
         }
         collector?.endPass()
         return Ops.pick(finalInput(blocks, x), 0)
