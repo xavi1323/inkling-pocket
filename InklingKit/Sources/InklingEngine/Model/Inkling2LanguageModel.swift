@@ -27,14 +27,20 @@ public final class Inkling2LanguageModel: CausalLM {
         lmHead = try loader.linear("lm_head")
     }
 
-    public static func load(config: InklingModelConfig, weights: WeightSource) throws -> Inkling2LanguageModel {
-        try Inkling2LanguageModel(config: config.text, loader: WeightLoader(source: weights, quant: config.quantization))
+    /// `expertSlots`: stream experts through that many slots per layer instead of handing MLX the mapped tensors.
+    public static func load(config: InklingModelConfig, weights: WeightSource, expertSlots: Int? = nil) throws -> Inkling2LanguageModel {
+        var loader = WeightLoader(source: weights, quant: config.quantization)
+        loader.expertSlots = expertSlots
+        return try Inkling2LanguageModel(config: config.text, loader: loader)
     }
 
-    public static func load(manifest: ModelManifest, weights: WeightSource) throws -> Inkling2LanguageModel {
+    public static func load(manifest: ModelManifest, weights: WeightSource, expertSlots: Int? = nil) throws -> Inkling2LanguageModel {
         let data = try Data(contentsOf: manifest.folder.appending(path: "config.json"))
-        return try load(config: InklingModelConfig.decode(data), weights: weights)
+        return try load(config: InklingModelConfig.decode(data), weights: weights, expertSlots: expertSlots)
     }
+
+    /// One per MoE layer when experts are streamed.
+    var expertCaches: [ExpertCache] { model.layers.compactMap { $0.moe.cache } }
 
     /// One cache per layer visit (48 for Inkling 2 Mini).
     public func makeCache() -> [LayerVisitCache] {

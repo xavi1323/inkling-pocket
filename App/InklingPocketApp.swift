@@ -12,7 +12,7 @@ struct InklingPocketApp: App {
                 .environment(app)
                 .environment(app.settings)
                 .modelContainer(app.container)
-                .task(id: EngineKey(folder: app.modelFolder, path: app.settings.enginePath)) { await app.loadEngineIfNeeded() }
+                .task(id: EngineKey(folder: app.modelFolder, path: app.settings.enginePath, budget: app.settings.memoryBudgetOverrideGB)) { await app.loadEngineIfNeeded() }
                 .onChange(of: app.settings.contextCap) { app.applyEngineSettings() }
                 .onChange(of: app.settings.memoryBudgetOverrideGB) { app.applyEngineSettings() }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
@@ -35,6 +35,7 @@ struct InklingPocketApp: App {
 private struct EngineKey: Equatable {
     var folder: URL?
     var path: EnginePath
+    var budget: Double
 }
 
 struct RootView: View {

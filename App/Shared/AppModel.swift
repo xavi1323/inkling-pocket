@@ -41,7 +41,7 @@ final class AppModel {
     @ObservationIgnored private var sessions: [UUID: ChatSession] = [:]
     @ObservationIgnored var model: any LanguageModel = EchoModel()
     var engineStatus: EngineStatus = .echo
-    @ObservationIgnored private var loadedEngine: (folder: URL, path: EnginePath)?
+    @ObservationIgnored private var loadedEngine: (folder: URL, path: EnginePath, budget: Double)?
 
     init() {
         let container = (try? PocketSchema.container()) ?? (try! PocketSchema.container(inMemory: true))
@@ -64,8 +64,13 @@ final class AppModel {
             return
         }
         let path = settings.enginePath
-        if let loaded = loadedEngine, loaded.folder == folder, loaded.path == path, engineStatus == .ready { return }
+        let budget = settings.memoryBudgetOverrideGB
+        if let loaded = loadedEngine, loaded.folder == folder, loaded.path == path, loaded.budget == budget, engineStatus == .ready { return }
         // A newer load (folder or engine changed) cancels this one; its result is then thrown away.
+        // Drop the old engine first: two engines' expert slots do not fit in memory together.
+        model = EchoModel()
+        loadedEngine = nil
+        InklingGenerator.releaseFreedMemory()
         engineStatus = .loading
         do {
             let override = settings.memoryBudgetOverrideGB
@@ -73,7 +78,7 @@ final class AppModel {
             await engine.setContextLimit(settings.contextCap)
             guard !Task.isCancelled else { return }
             model = engine
-            loadedEngine = (folder, path)
+            loadedEngine = (folder, path, budget)
             engineStatus = .ready
         } catch {
             guard !Task.isCancelled else { return }
@@ -88,11 +93,10 @@ final class AppModel {
         (model as? InklingGenerator)?.handleMemoryWarning()
     }
 
-    /// Settings → context size or memory budget changed: pass them to the loaded engine.
+    /// Settings → context size changed: pass it to the loaded engine (a memory budget change reloads the engine).
     func applyEngineSettings() {
         guard let engine = model as? InklingGenerator else { return }
-        let cap = settings.contextCap, override = settings.memoryBudgetOverrideGB
-        engine.setMemoryBudget(gb: override > 0 ? override : nil)
+        let cap = settings.contextCap
         Task { await engine.setContextLimit(cap) }
     }
 

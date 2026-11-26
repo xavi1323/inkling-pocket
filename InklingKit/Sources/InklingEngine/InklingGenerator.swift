@@ -17,51 +17,71 @@ public actor InklingGenerator: LanguageModel {
     let generator: TokenGenerator
     /// Bytes of memory-mapped weight shards (0 for test models).
     public let mappedWeightBytes: Int64
-    /// Hot-expert residency over the mapped weights (nil for test models).
-    public let residency: ExpertResidency?
-    /// Mapped bytes that are not expert weights (subtracted from the memory budget).
+    /// Expert slots per MoE layer (nil when experts are not streamed, e.g. test models).
+    public let expertSlots: Int?
+    /// Mapped bytes that are not expert weights.
     let nonExpertBytes: Int64
+    /// Working memory kept free for the KV cache, activations and Metal scratch on top of `MemoryBudget`'s margin.
+    static let workingReserve: Int64 = 600_000_000
+    static let mlxCacheLimit = 256 << 20
+
+    /// Gives memory freed by a dropped engine back to iOS (call after releasing the old engine, before loading).
+    public static func releaseFreedMemory() { Memory.clearCache() }
     public private(set) var stats = GenerationStats()
 
     /// Loads config, tokenizer and memory-mapped weights from an imported model folder.
     public init(modelFolder: URL, path: EnginePath, memoryBudgetGB: Double? = nil) async throws {
         let manifest = try ModelFolder.validate(modelFolder)
+        // Freed MLX buffers are kept for reuse up to this size; the default (most of RAM) is far too much here.
+        Memory.cacheLimit = Self.mlxCacheLimit
         let weights = try MappedSafetensors(manifest: manifest)
-        let model = try Inkling2LanguageModel.load(manifest: manifest, weights: weights)
+        let data = try Data(contentsOf: manifest.folder.appending(path: "config.json"))
+        let config = try InklingModelConfig.decode(data)
+        let perSlot = Self.bytesPerSlot(weights: weights, config: config.text)
+        let nonExpert = weights.mappedBytes - perSlot * Int64(config.text.numExperts)
+        let slots = Self.slots(budget: MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert - Self.workingReserve,
+                               perSlot: perSlot, config: config.text)
+        let model = try Inkling2LanguageModel.load(config: config, weights: weights, expertSlots: slots)
         let tokenizer = try InklingTokenizer(modelFolder: modelFolder)
-        let config = model.config
-        let expertBytes = ExpertResidency.expertSizes(weights: weights, config: config).reduce(0, +) * Int64(config.numExperts)
-        let nonExpert = weights.mappedBytes - expertBytes
-        let budget = max(0, MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert)
-        let residency = ExpertResidency(weights: weights, config: config, budget: budget)
-        model.collector = RouteCollector()
-        self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes, residency: residency,
+        self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes, expertSlots: slots,
                   nonExpertBytes: nonExpert)
     }
 
+    /// Bytes of one expert in every MoE layer (one slot everywhere).
+    static func bytesPerSlot(weights: MappedSafetensors, config: InklingTextConfig) -> Int64 {
+        (0..<config.numHiddenLayers).map {
+            ExpertCache.bytesPerExpert(path: "model.layers.\($0).mlp", weights: weights, prefix: "language_model.", experts: config.numExperts)
+        }.reduce(0, +)
+    }
+
+    /// Slots per layer that fit `budget`: at least one token's experts, at most all of them.
+    static func slots(budget: Int64, perSlot: Int64, config: InklingTextConfig) -> Int {
+        guard perSlot > 0 else { return config.numExperts }
+        return Int(min(max(budget / perSlot, Int64(config.expertsPerToken)), Int64(config.numExperts)))
+    }
+
     init(model: CausalLM, tokenizer: InklingTokenizer, path: EnginePath = .reference, mappedBytes: Int64 = 0,
-         residency: ExpertResidency? = nil, nonExpertBytes: Int64 = 0) {
+         expertSlots: Int? = nil, nonExpertBytes: Int64 = 0) {
         self.nonExpertBytes = nonExpertBytes
         self.tokenizer = tokenizer
         self.path = path
         mappedWeightBytes = mappedBytes
-        self.residency = residency
+        self.expertSlots = expertSlots
         if path == .fast, let lm = model as? Inkling2LanguageModel {
             generator = TokenGenerator(model: FastPath(lm), eos: [tokenizer.eosID])
-            generator.pipelined = true
+            // Streaming reads routing back every layer, so there is nothing to overlap.
+            generator.pipelined = lm.expertCaches.isEmpty
         } else {
             generator = TokenGenerator(model: model, eos: [tokenizer.eosID])
         }
-        if let residency, let lm = model as? Inkling2LanguageModel, let collector = lm.collector {
-            let visits = lm.config.layerVisits
-            generator.afterStep = { inFlight in
-                for (visit, experts) in collector.drain(keepingLatest: inFlight) {
-                    residency.record(layer: visits[visit], experts: experts)
-                    residency.prefetch(layer: visits[visit], experts: experts)
-                }
-                residency.step()
-            }
-        }
+    }
+
+    /// Share of expert lookups already in a slot (nil when not streaming).
+    var expertHitRate: Double? {
+        guard let lm = paths().reference as? Inkling2LanguageModel else { return nil }
+        let caches = lm.expertCaches
+        let hits = caches.map(\.hits).reduce(0, +), total = hits + caches.map(\.misses).reduce(0, +)
+        return total == 0 ? nil : Double(hits) / Double(total)
     }
 
     /// (reference, fast) models over the same weights; test models without the Inkling layers use themselves for both.
@@ -71,14 +91,11 @@ public actor InklingGenerator: LanguageModel {
         return (generator.model, generator.model)
     }
 
-    /// iOS memory warning: shrink the pinned expert set (E10). Not actor-isolated, so it acts even mid-answer.
-    public nonisolated func handleMemoryWarning() { residency?.handleMemoryWarning() }
+    /// iOS memory warning. Expert slots are a fixed size chosen at load, so there is nothing to shrink here.
+    public nonisolated func handleMemoryWarning() {}
 
-    /// Settings → Memory budget changed (GB, nil = automatic).
-    public nonisolated func setMemoryBudget(gb: Double?) {
-        guard let residency else { return }
-        residency.setBudget(max(0, MemoryBudget.current(overrideGB: gb) - nonExpertBytes))
-    }
+    /// Settings → Memory budget changed (GB, nil = automatic). Slots are sized at load: applies on the next load.
+    public nonisolated func setMemoryBudget(gb: Double?) {}
 
     public nonisolated func countTokens(_ text: String) -> Int { tokenizer.encode(text).count }
 

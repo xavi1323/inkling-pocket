@@ -22,6 +22,8 @@ public struct BenchmarkReport: Sendable, Equatable {
     public var peakFootprintBytes: Int64?
     public var mappedWeightBytes: Int64 = 0
     public var expertHitRate: Double?
+    /// Expert slots per layer (streaming), nil when the whole expert tensors are used.
+    public var expertSlots: Int?
     public var thermalState = "unknown"
     public var routing = ""
     public var passOverlap = ""
@@ -39,7 +41,8 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Footprint now: \(gb(footprintBytes))",
             "Peak footprint: \(gb(peakFootprintBytes))",
             "Mapped weights: \(gb(mappedWeightBytes))",
-            "Expert hit rate: \(expertHitRate.map { String(format: "%.1f%%", $0 * 100) } ?? "n/a (residency not active)")",
+            "Expert hit rate: \(expertHitRate.map { String(format: "%.1f%%", $0 * 100) } ?? "n/a (not streaming)")",
+            "Expert slots per layer: \(expertSlots.map(String.init) ?? "all (not streaming)")",
             "Thermal: \(thermalState)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
             "Routing:",
@@ -120,7 +123,8 @@ extension InklingGenerator {
         report.availableMemoryBytes = MemoryInfo.availableBytes()
         report.mappedWeightBytes = mappedWeightBytes
         report.thermalState = MemoryInfo.thermalState()
-        report.expertHitRate = residency?.hitRate
+        report.expertHitRate = expertHitRate
+        report.expertSlots = expertSlots
         if let lm = reference as? Inkling2LanguageModel {
             progress("Recording expert routing…")
             let stats = RoutingStats(visits: lm.config.layerVisits, numExperts: lm.config.numExperts)
