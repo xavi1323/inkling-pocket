@@ -60,3 +60,21 @@ func tempDir() throws -> URL {
     #expect(try st.array("x").asArray(Float.self) == big)
     #expect(try st.array("y").asType(.float32).asArray(Float.self) == [1, 2, 3])
 }
+
+/// Arrays must stay valid after the `MappedSafetensors` object is gone (macOS NaNs came from freed mappings).
+@Test func arraysOutliveMapping() throws {
+    let url = Tiny.dir.appending(path: "model.safetensors")
+    let expected = try MappedSafetensors(files: [url]).names.sorted().map { name in
+        (name, try MappedSafetensors(files: [url]).array(name).asType(.float32).sum().item(Float.self))
+    }
+    var arrays: [(String, MLXArray)] = []
+    do {
+        let weights = try MappedSafetensors(files: [url])
+        arrays = try weights.names.sorted().map { ($0, try weights.array($0)) }
+    }
+    for _ in 0..<3 { _ = try MappedSafetensors(files: [url]).array(expected[0].0).sum().item(Float.self) }
+    for ((name, array), (_, sum)) in zip(arrays, expected) {
+        let value = array.asType(.float32).sum().item(Float.self)
+        #expect(value == sum || (value.isNaN && sum.isNaN), "\(name)")
+    }
+}

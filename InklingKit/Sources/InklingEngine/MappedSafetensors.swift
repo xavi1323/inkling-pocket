@@ -74,8 +74,9 @@ public final class MappedSafetensors: @unchecked Sendable {
             let whole = MLXArray(rawPointer: ptr, [Int(e.paddedLength) / dtype.size], dtype: dtype, finalizer: { [self] in _ = self })
             return whole[0..<count].reshaped(e.shape)
         }
-        // Not page-aligned: MLX copies the bytes into its own buffer and calls the finalizer right away.
-        return MLXArray(rawPointer: ptr, e.shape, dtype: dtype, finalizer: {})
+        // Not repacked: MLX copies the bytes unless Metal can wrap them (a page-aligned start is enough on Apple), in
+        // which case the array points into the mapping — so the finalizer must keep the mapping alive either way.
+        return MLXArray(rawPointer: ptr, e.shape, dtype: dtype, finalizer: { [self] in _ = self })
     }
 
     static func dtype(_ name: String) throws -> DType {
