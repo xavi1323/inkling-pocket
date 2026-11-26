@@ -125,12 +125,13 @@ final class Attention {
             mask = concatenated([mask, sinks], axis: -1)
             return Ops.attention(q: q, k: k, v: v, scale: scale, mask: mask)
         }
-        guard length > Self.queryBlock else { return block(0, length) }
+        let step = Self.queryBlock  // read once: tests change it
+        guard length > step else { return block(0, length) }
         // Long chunks: one query block at a time, so the [H, block, keys] mask stays small however long the chunk.
         Self.queryBlockedCalls += 1
         var outs: [MLXArray] = []
-        for start in stride(from: 0, to: length, by: Self.queryBlock) {
-            let out = block(start, min(start + Self.queryBlock, length))
+        for start in stride(from: 0, to: length, by: step) {
+            let out = block(start, min(start + step, length))
             eval(out)
             outs.append(out)
         }
