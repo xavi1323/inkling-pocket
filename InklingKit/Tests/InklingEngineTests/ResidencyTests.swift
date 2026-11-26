@@ -86,3 +86,23 @@ private func k(_ l: Int, _ e: Int) -> ExpertKey { ExpertKey(layer: l, expert: e)
         #expect(expected > 0)
     }
 }
+
+@Suite struct ResidencyStepTests {
+    @Test func stepRebalancesEvery32() {
+        let r = ExpertResidency(budget: 1_000, expertBytes: { _ in 100 }, pager: nil)
+        r.record(layer: 0, experts: [1])
+        for _ in 0..<31 { r.step() }
+        #expect(r.pinned.isEmpty)
+        r.step()
+        #expect(r.pinned == [ExpertKey(layer: 0, expert: 1)])
+    }
+
+    @Test func memoryWarningBeforePinningKeepsAFloor() {
+        let r = ExpertResidency(budget: 800, expertBytes: { _ in 100 }, pager: nil)
+        for _ in 0..<6 { r.handleMemoryWarning() }
+        #expect(r.budget >= 100)  // never drops to zero: at least 1/8 of the starting budget
+        r.record(layer: 0, experts: [1])
+        r.rebalance()
+        #expect(r.pinned.count == 1)
+    }
+}

@@ -137,3 +137,19 @@ func greedy() -> GenerateParameters {
         #expect(saved.first?.content.hasPrefix("Partial") == true)
     }
 }
+
+@Suite(.serialized) struct PrefillStopTests {
+    init() { Device.setDefault(device: .cpu) }
+
+    @Test func stopDuringPrefillReturnsEarly() {
+        let model = ScriptModel(script: [5], vocab: 500)
+        let gen = TokenGenerator(model: model, eos: [])
+        gen.prefillChunk = 256
+        var checks = 0
+        let out = gen.generate(prompt: Array(repeating: 3, count: 600), sampler: Sampler(greedy()), maxTokens: 4,
+                               shouldStop: { checks += 1; return model.callCount >= 1 }, onToken: { _ in })
+        #expect(out.isEmpty)
+        #expect(model.callCount == 1)
+        #expect(checks > 0)
+    }
+}

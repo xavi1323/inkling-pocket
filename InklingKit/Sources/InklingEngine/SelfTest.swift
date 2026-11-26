@@ -72,16 +72,29 @@ public enum SelfTest {
         output.lowercased().contains(expected.lowercased())
     }
 
-    /// Teacher-forced comparison: both paths read the same sequences; the last `scored` positions are compared.
+    /// Teacher-forced comparison, run the way decoding runs: each path reads the sequence up to the first scored
+    /// position in one pass, then the remaining tokens one at a time (so the fast path's single-token kernels are used).
+    /// Logits for the last `scored` positions are compared.
     public static func compare(reference: CausalLM, fast: CausalLM, sequences: [[Int32]], scored: Int) -> PathComparison {
         var agree = 0, total = 0
         var kld = 0.0
         var maxDiff: Float = 0
+        func stepped(_ model: CausalLM, _ seq: [Int32], _ n: Int) -> MLXArray {
+            let cache = model.makeCache()
+            let split = seq.count - n + 1
+            var rows = [model(MLXArray(Array(seq[..<split])).reshaped([1, -1]), cache: cache)[0, -1]]
+            for token in seq[split...] {
+                let row = model(MLXArray([token]).reshaped([1, 1]), cache: cache)[0, -1]
+                eval(row)
+                rows.append(row)
+            }
+            return stacked(rows, axis: 0).asType(.float32)
+        }
         for seq in sequences {
-            let input = MLXArray(seq).reshaped([1, -1])
             let n = min(scored, seq.count)
-            let a = reference(input, cache: reference.makeCache())[0, (seq.count - n)...].asType(.float32)
-            let b = fast(input, cache: fast.makeCache())[0, (seq.count - n)...].asType(.float32)
+            guard n > 0 else { continue }
+            let a = stepped(reference, seq, n)
+            let b = stepped(fast, seq, n)
             agree += (argMax(a, axis: -1) .== argMax(b, axis: -1)).asType(.int32).sum().item(Int.self)
             total += n
             let la = a - logSumExp(a, axis: -1, keepDims: true)

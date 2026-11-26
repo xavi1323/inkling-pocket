@@ -89,7 +89,9 @@ final class MarkdownWriter {
             inline = []
         }
         for node in nodes {
-            if node.name.isEmpty || !Self.blocks.contains(node.name) {
+            // Inline wrappers (span, custom elements) around blocks are containers; links stay inline.
+            let isBlock = !node.name.isEmpty && (Self.blocks.contains(node.name) || (node.name != "a" && Self.hasBlock(node)))
+            if !isBlock {
                 inline.append(node)
                 continue
             }
@@ -235,6 +237,10 @@ final class MarkdownWriter {
         guard !core.isEmpty else { return text }
         let lead = text.prefix { $0 == " " }, trail = String(text.reversed().prefix { $0 == " " })
         return lead + open + core + close + trail
+    }
+
+    static func hasBlock(_ node: Node) -> Bool {
+        node.children.contains { !$0.name.isEmpty && (blocks.contains($0.name) || hasBlock($0)) }
     }
 
     static func rawText(_ node: Node) -> String {

@@ -13,6 +13,8 @@ struct InklingPocketApp: App {
                 .environment(app.settings)
                 .modelContainer(app.container)
                 .task(id: EngineKey(folder: app.modelFolder, path: app.settings.enginePath)) { await app.loadEngineIfNeeded() }
+                .onChange(of: app.settings.contextCap) { app.applyEngineSettings() }
+                .onChange(of: app.settings.memoryBudgetOverrideGB) { app.applyEngineSettings() }
                 .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
                     app.handleMemoryWarning()
                 }

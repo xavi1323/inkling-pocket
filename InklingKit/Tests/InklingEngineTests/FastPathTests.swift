@@ -114,3 +114,28 @@ import Metal
         #expect(c.drain(keepingLatest: 0).map(\.experts) == [[3]])
     }
 }
+
+/// Differs from its base only on single-token steps, like the fused MoE.
+final class StepOnlyDifferent: CausalLM {
+    let base: Inkling2LanguageModel
+    init(_ base: Inkling2LanguageModel) { self.base = base }
+    func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
+        let out = base(tokens, cache: cache)
+        return tokens.dim(1) == 1 ? -out : out
+    }
+    func makeCache() -> [LayerVisitCache] { base.makeCache() }
+}
+
+@Suite(.serialized) struct SelfTestStepTests {
+    init() { Device.setDefault(device: .cpu) }
+
+    /// The Self-test must drive the fast path one token at a time, the way decoding does.
+    @Test func selfTestComparesSingleTokenSteps() throws {
+        let model = try Tiny.model()
+        let seq: [Int32] = [1, 17, 42, 99, 256, 3, 499, 7, 77, 128, 311, 64]
+        let c = SelfTest.compare(reference: model, fast: StepOnlyDifferent(model), sequences: [seq], scored: 8)
+        #expect(c.top1Agreement < 0.97)
+        let same = SelfTest.compare(reference: model, fast: model, sequences: [seq], scored: 8)
+        #expect(same.top1Agreement == 1)
+    }
+}

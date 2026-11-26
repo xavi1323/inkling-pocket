@@ -126,3 +126,10 @@ func fitMarkdownSimilar(name: String) throws {
     #expect(r.markdownWithCitations.contains("again⟨1⟩"))
     #expect(r.references.map(\.absoluteString) == ["https://a.b/one", "https://two.org"])
 }
+
+@Test func blocksInsideInlineElementsKeepTheirShape() {
+    let code = MarkdownWriter(baseURL: "").markdown("<span><pre>def f():\n    return 1</pre></span>")
+    #expect(code.contains("```\ndef f():\n    return 1\n```"))
+    let paras = MarkdownWriter(baseURL: "").markdown("<custom-app><p>one</p><p>two</p></custom-app>")
+    #expect(paras.contains("one\n\ntwo"))
+}

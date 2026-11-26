@@ -55,7 +55,10 @@ public final class TokenGenerator {
 
     /// Feeds the prompt (only the part after the previous prompt, when that is a prefix) and returns logits [V].
     @discardableResult
-    public func prefill(_ prompt: [Int32]) -> MLXArray {
+    public func prefill(_ prompt: [Int32]) -> MLXArray { prefill(prompt, shouldStop: { false })! }
+
+    /// As `prefill(_:)`, but checks `shouldStop` between chunks; returns nil (and forgets the prompt) when stopped.
+    func prefill(_ prompt: [Int32], shouldStop: () -> Bool) -> MLXArray? {
         precondition(!prompt.isEmpty, "empty prompt")
         let start = Date()
         var from = 0
@@ -74,6 +77,11 @@ public final class TokenGenerator {
             logits = out[0, -1]
             eval(logits!)
             i = end
+            if i < prompt.count, shouldStop() {
+                mark = nil
+                cache = model.makeCache()
+                return nil
+            }
         }
         let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
         mark = (prompt, snapshots.count == cache.count ? snapshots : [], logits!)
@@ -93,7 +101,7 @@ public final class TokenGenerator {
                          onToken: (Int32) -> Void) -> [Int32] {
         if pipelined { return generatePipelined(prompt: prompt, sampler: sampler, maxTokens: maxTokens, shouldStop: shouldStop, onToken: onToken) }
         let started = ContinuousClock.now
-        var logits = prefill(prompt)
+        guard var logits = prefill(prompt, shouldStop: shouldStop) else { return [] }
         var produced: [Int32] = []
         var history = prompt.suffix(sampler.penaltyWindow).map { $0 }
         var decodeStart: ContinuousClock.Instant?
@@ -127,7 +135,7 @@ public final class TokenGenerator {
                            onToken: (Int32) -> Void) -> [Int32] {
         let started = ContinuousClock.now
         let gpu = GPUSampler(sampler)
-        let logits = prefill(prompt)
+        guard let logits = prefill(prompt, shouldStop: shouldStop) else { return [] }
         var history: MLXArray? = gpu.usesHistory ? MLXArray(Array(prompt.suffix(sampler.penaltyWindow))) : nil
         var produced: [Int32] = []
         var decodeStart: ContinuousClock.Instant?

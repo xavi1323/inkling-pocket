@@ -65,26 +65,35 @@ final class AppModel {
         }
         let path = settings.enginePath
         if let loaded = loadedEngine, loaded.folder == folder, loaded.path == path, engineStatus == .ready { return }
-        guard engineStatus != .loading else { return }
+        // A newer load (folder or engine changed) cancels this one; its result is then thrown away.
         engineStatus = .loading
         do {
             let override = settings.memoryBudgetOverrideGB
             let engine = try await InklingGenerator(modelFolder: folder, path: path, memoryBudgetGB: override > 0 ? override : nil)
             await engine.setContextLimit(settings.contextCap)
+            guard !Task.isCancelled else { return }
             model = engine
             loadedEngine = (folder, path)
             engineStatus = .ready
         } catch {
+            guard !Task.isCancelled else { return }
             model = EchoModel()
             loadedEngine = nil
             engineStatus = .failed(String(describing: error))
         }
     }
 
-    /// iOS is short of memory: let the engine drop part of its pinned experts.
+    /// iOS is short of memory: let the engine drop part of its pinned experts (acts even mid-answer).
     func handleMemoryWarning() {
+        (model as? InklingGenerator)?.handleMemoryWarning()
+    }
+
+    /// Settings → context size or memory budget changed: pass them to the loaded engine.
+    func applyEngineSettings() {
         guard let engine = model as? InklingGenerator else { return }
-        Task { await engine.handleMemoryWarning() }
+        let cap = settings.contextCap, override = settings.memoryBudgetOverrideGB
+        engine.setMemoryBudget(gb: override > 0 ? override : nil)
+        Task { await engine.setContextLimit(cap) }
     }
 
     /// Stops every running generation (e.g. when the app goes to the background).

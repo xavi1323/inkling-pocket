@@ -28,9 +28,14 @@ public final class ExpertResidency: @unchecked Sendable {
     private var pinnedSet: Set<ExpertKey> = []
     private var hits = 0, lookups = 0
     public private(set) var budget: Int64
+    /// Memory warnings never push the budget below 1/8 of the starting one.
+    private let floorBudget: Int64
+    private var steps = 0
+    public static let rebalanceEvery = 32
 
     public init(budget: Int64, expertBytes: @escaping (ExpertKey) -> Int64, pager: ExpertPager?) {
         self.budget = budget
+        floorBudget = budget / 8
         self.expertBytes = expertBytes
         self.pager = pager
     }
@@ -89,8 +94,23 @@ public final class ExpertResidency: @unchecked Sendable {
     /// Memory warning: keep only the hottest half (by bytes) and lower the budget to match.
     public func handleMemoryWarning() {
         lock.withLock {
-            budget = pinnedBytesLocked / 2
+            budget = max(floorBudget, pinnedBytesLocked > 0 ? pinnedBytesLocked / 2 : budget / 2)
         }
+        rebalance()
+    }
+
+    /// One decode step finished; re-picks the pinned experts every `rebalanceEvery` steps.
+    public func step() {
+        let due = lock.withLock { () -> Bool in
+            steps += 1
+            return steps % Self.rebalanceEvery == 0
+        }
+        if due { rebalance() }
+    }
+
+    /// New budget for expert pages (Settings change).
+    public func setBudget(_ bytes: Int64) {
+        lock.withLock { budget = max(0, bytes) }
         rebalance()
     }
 
