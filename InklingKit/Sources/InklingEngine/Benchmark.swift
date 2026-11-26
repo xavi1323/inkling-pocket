@@ -64,6 +64,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Smart expert picks: \(smartRouting ? "on (top \(SparseMoE.smartKeepTopDefault) always exact)" : "off")",
             "Decode ceiling (no routing waits or reads): \(ceiling.isEmpty ? "n/a" : ceiling)",
             "Storage reads: \(storage.isEmpty ? "n/a" : storage)",
+            "GPU kernels: \(KernelTuning.shared.report)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
             "Routing:",
             routing,

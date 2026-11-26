@@ -295,17 +295,25 @@ final class ExpertCache: @unchecked Sendable {
         }
     }
 
-    /// Prompt chunks: reads up to `count` experts that are not in a slot, most-used first, into the least-used slots
-    /// in the background. A chunk routes to nearly every expert, so the next visit needs them anyway; reading them
-    /// while the current visit still computes overlaps storage with the GPU (HF expert streaming: 68 → 228 tok/s
-    /// prefill). Only call while no queued GPU work reads this layer's slots.
-    func readAheadMissing(_ count: Int) {
-        guard count > 0 else { return }
+    /// Prompt chunks: reads the next visit's guessed experts (`guessed`, most wanted first) that are not in a slot,
+    /// in the background, into slots that hold none of the guessed experts. A chunk routes to nearly every expert
+    /// its router picks, so the next visit needs them anyway; reading them while the current visit still computes
+    /// overlaps storage with the GPU (HF expert streaming: 68 → 228 tok/s prefill). Experts the guess still wants
+    /// are never evicted for this (reading by last session's heat did that and wasted most reads).
+    /// Only call while no queued GPU work reads this cache's slots.
+    func readAhead(_ guessed: [Int]) {
+        guard !guessed.isEmpty else { return }
         let delay = readDelay, group = DispatchGroup()
         group.enter()
         queue.async { [self] in
-            let wanted = Array((0..<experts).filter { slotOf[$0] == nil }.sorted { uses[$0] > uses[$1] }.prefix(count))
-            guard !wanted.isEmpty, let r = reserve(wanted, counting: false, group: group), !r.jobs.isEmpty else {
+            let keep = Set(guessed.compactMap { slotOf[$0] })
+            let room = (0..<slots).filter { !keep.contains($0) && loading[$0] == nil }.count
+            var seen = Set<Int>()
+            let wanted = Array(guessed.filter { slotOf[$0] == nil && seen.insert($0).inserted }.prefix(room))
+            // Rank past the guess ranks: counted as read ahead / used, not in the per-rank decode stats.
+            let ranks = Dictionary(uniqueKeysWithValues: wanted.map { ($0, StreamProfile.ranks) })
+            guard !wanted.isEmpty, let r = reserve(wanted, counting: false, group: group, ranks: ranks, avoiding: keep),
+                  !r.jobs.isEmpty else {
                 group.leave()
                 return
             }

@@ -172,7 +172,9 @@ final class SparseMoE {
         let rows = b * length
         let guess = rows <= Self.smartMaxTokens && next?.cache != nil
             ? (fast && Ops.useFused ? next!.compiledGuess(x) : next!.rankedGuess(x)) : nil
-        let waited = [indices] + (guess.map { [$0] } ?? [])
+        // Prompt chunks: the next visit's router on this chunk, to read its experts in while this visit computes.
+        let chunkGuess = rows > Self.smartMaxTokens && next?.cache != nil && next?.cache !== cache ? next!.rankedGuess(x) : nil
+        let waited = [indices] + (guess.map { [$0] } ?? []) + (chunkGuess.map { [$0] } ?? [])
         if let profile = cache.profile { profile.time(\.gpuWait) { eval(waited) } } else { eval(waited) }
         let ids = indices.asArray(Int32.self)
         if let guess, let nextCache = next?.cache {
@@ -183,10 +185,16 @@ final class SparseMoE {
         var unique: [Int] = []
         var seen = Set<Int>()
         for id in ids where seen.insert(Int(id)).inserted { unique.append(Int(id)) }
+        // Once this visit's work is queued: read the next visit's guessed experts while the GPU runs it.
+        func readAheadNext() {
+            guard let chunkGuess, let nextCache = next?.cache else { return }
+            nextCache.readAhead(Self.byCount(chunkGuess.asArray(Int32.self)))
+        }
         if unique.count <= cache.slots {
             let map = cache.ensure(unique)
             let out = experts(x, MLXArray(ids.map { map[Int($0)]! }).reshaped(indices.shape), weights, fast: fast)
             asyncEval(out)  // start the GPU while the next layer's graph is built
+            readAheadNext()
             return out
         }
         // More experts than slots (long prompt chunks): run them in groups, each over only the routes it serves.
@@ -230,10 +238,17 @@ final class SparseMoE {
             missing.removeFirst(group.count)
             run(group)
         }
-        // The GPU still runs the last batches and storage is idle: start reading the next visit's missing experts
-        // (a chunk needs nearly all of them). Its slots are free: its earlier visits finished before our routing.
-        if let nextCache = next?.cache, nextCache !== cache { nextCache.readAheadMissing(nextCache.slots / 2) }
+        // The GPU still runs the last batches and storage is idle. The next visit's slots are free: its earlier
+        // visits finished before our routing was read back.
+        readAheadNext()
         return total.reshaped([b, length, d]).asType(x.dtype)
+    }
+
+    /// Distinct experts in `guess`, most often guessed first (ties: lower id).
+    static func byCount(_ guess: [Int32]) -> [Int] {
+        var counts: [Int: Int] = [:]
+        for e in guess { counts[Int(e), default: 0] += 1 }
+        return counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
     }
 
     /// How many of each token's best guesses a multi-token check reads ahead (smart picks always run the top 3).

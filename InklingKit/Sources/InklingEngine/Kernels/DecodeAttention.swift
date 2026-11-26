@@ -3,7 +3,7 @@ import MLX
 /// One token's attention straight over the K/V cache buffers: relative-position logits within `relExtent`, the
 /// sliding window, grouped KV heads and the query-dependent zero "sink", in one pass. Replaces building the
 /// [heads × keys] mask, appending the sink column and copying K/V with a zero row every step.
-/// On an Apple GPU one Metal kernel (one threadgroup of 32 simdgroups per head, online softmax); elsewhere MLX ops
+/// On an Apple GPU one Metal kernel (one threadgroup of 8–32 simdgroups per head, online softmax); elsewhere MLX ops
 /// in the reference's precision.
 enum DecodeAttention {
     /// q [1,H,1,D], rel logits [H, relExtent], sinks [H] → [1,H,1,D].
@@ -41,14 +41,18 @@ enum DecodeAttention {
     }
 
     #if canImport(Metal)
+    /// `groups`: simdgroups per head (each takes every `groups`-th key); picked on the device by `KernelTuning`.
+    /// 32 × groups threads must cover D for the final step.
     static func kernel(q: MLXArray, kv: DecodeKV, rel: MLXArray, sinks: MLXArray, kvHeads: Int,
-                       sliding: Int, relExtent: Int) -> MLXArray {
+                       sliding: Int, relExtent: Int, groups requested: Int? = nil) -> MLXArray {
         let (h, d) = (q.dim(1), q.dim(3))
+        let wanted = requested ?? KernelTuning.shared.attentionGroups
+        let groups = 32 * wanted >= d ? wanted : 32
         let meta = MLXArray([Int32(kv.valid), Int32(kv.index), Int32(kv.keys.dim(2))])
         let out = decodeKernel(
             [q.reshaped([-1]), kv.keys, kv.values, rel.reshaped([-1]), sinks.reshaped([-1]).asType(q.dtype), meta],
-            template: [("T", q.dtype), ("D", d), ("REP", h / kvHeads), ("REL", relExtent), ("SLIDING", sliding)],
-            grid: (1024 * h, 1, 1), threadGroup: (1024, 1, 1),
+            template: [("T", q.dtype), ("D", d), ("REP", h / kvHeads), ("REL", relExtent), ("SLIDING", sliding), ("NSG", groups)],
+            grid: (32 * groups * h, 1, 1), threadGroup: (32 * groups, 1, 1),
             outputShapes: [[h * d]], outputDTypes: [q.dtype])[0]
         return out.reshaped([1, h, 1, d])
     }
@@ -71,7 +75,7 @@ enum DecodeAttention {
             o[i] = 0.0f;
         }
         float m = -INFINITY, l = 0.0f;
-        for (int j = int(sg); j < valid; j += 32) {
+        for (int j = int(sg); j < valid; j += NSG) {
             const int dist = j < index ? index - 1 - j : index - 1 - j + valid;
             if (SLIDING > 0 && dist >= SLIDING) continue;
             const size_t row = base + size_t(j) * D + lane * E;
@@ -85,9 +89,9 @@ enum DecodeAttention {
             l = l * a + p;
             m = mn;
         }
-        threadgroup float tm[32];
-        threadgroup float tl[32];
-        threadgroup float to[32 * D];
+        threadgroup float tm[NSG];
+        threadgroup float tl[NSG];
+        threadgroup float to[NSG * D];
         if (lane == 0) { tm[sg] = m; tl[sg] = l; }
         for (int i = 0; i < E; i++) to[sg * D + lane * E + i] = o[i];
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -95,9 +99,9 @@ enum DecodeAttention {
         if (t < uint(D)) {
             const float sink = float(sinks[head]);
             float mx = sink;
-            for (int g = 0; g < 32; g++) mx = max(mx, tm[g]);
+            for (int g = 0; g < NSG; g++) mx = max(mx, tm[g]);
             float den = metal::exp(sink - mx), acc = 0.0f;
-            for (int g = 0; g < 32; g++) {
+            for (int g = 0; g < NSG; g++) {
                 const float w = metal::exp(tm[g] - mx);
                 den += tl[g] * w;
                 acc += to[g * D + t] * w;

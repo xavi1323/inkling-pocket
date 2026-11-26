@@ -66,15 +66,31 @@ import MLX
         #expect(ranks == [0, 0, 1])
     }
 
-    @Test func promptChunkReadsAheadMissingExperts() throws {
+    /// Prompt chunks read the next visit's guessed experts, never evicting one the guess still wants.
+    @Test func promptChunkReadsAheadGuessedExperts() throws {
         let model = try ExpertStreamingTests.streamed(slots: 3)
         let cache = model.expertCaches[0]
-        cache.readAheadMissing(2)
+        _ = cache.ensure([0, 1, 2])
+        cache.readAhead([1, 3, 4])  // 1 is in a slot: keep it; room for 2 more
         cache.waitForLoads()
         #expect(cache.prefetched == 2)
-        cache.readAheadMissing(0)
+        #expect(cache.resident([1, 3, 4]) == [1, 3, 4])
+        cache.readAhead([])
         cache.waitForLoads()
         #expect(cache.prefetched == 2)
+        #expect(SparseMoE.byCount([5, 2, 5, 9, 2, 5]) == [5, 2, 9])
+    }
+
+    /// A long prompt in chunks with fewer slots than experts: same logits as the reference, and the read-ahead
+    /// reads are mostly used.
+    @Test func chunkReadAheadKeepsPrefillExact() throws {
+        let streamed = try ExpertStreamingTests.streamed(slots: 6)
+        let reference = try Tiny.model()
+        let gen = TokenGenerator(model: streamed, eos: [])
+        gen.prefillChunk = 20
+        let want = TokenGenerator(model: reference, eos: [])
+        want.prefillChunk = 20
+        #expect(run(gen, prompt, tokens: 4) == run(want, prompt, tokens: 4))
     }
 
     /// Slots go to the layer whose routing is spread; a layer that uses two experts keeps only `topK`.
@@ -89,15 +105,15 @@ import MLX
 
     /// Every piece size is tried, then the fastest is used.
     @Test func readSizeSettlesOnTheFastest() {
-        let reader = ExpertReader.shared
+        let tuner = PieceTuner()
         var seen = Set<Int>()
-        for _ in 0..<(ExpertReader.pieceChoices.count * ExpertReader.samplesPerChoice) {
-            let (i, size) = reader.choosePieceSize()
+        for _ in 0..<(PieceTuner.pieceChoices.count * PieceTuner.samplesPerChoice) {
+            let (i, size) = tuner.choose()
             seen.insert(size)
-            reader.record(choice: i, bytes: Int64(size), seconds: i == 1 ? 0.001 : 0.01)
+            tuner.record(choice: i, bytes: Int64(size), seconds: i == 1 ? 0.001 : 0.01)
         }
-        #expect(seen.count == ExpertReader.pieceChoices.count)
-        #expect(reader.preferredPieceSize == ExpertReader.pieceChoices[1])
+        #expect(seen.count == PieceTuner.pieceChoices.count)
+        #expect(tuner.preferred == PieceTuner.pieceChoices[1])
     }
 
     /// Top-k / top-p now sample among a partial selection; with top-k it is the same candidate set.

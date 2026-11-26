@@ -35,23 +35,48 @@ final class FusedMoEDecode {
     }
 
     func kernel(_ x: MLXArray, _ ids: MLXArray, _ w: MLXArray) -> MLXArray {
+        let config = KernelTuning.shared.moe
+        return downStep(gateUpStep(x, ids, config.gateUp), ids, w, config.down)
+    }
+
+    /// The gate/up kernel with `launch` (values per lane step, threadgroup size): [k * I] activations.
+    func gateUpStep(_ x: MLXArray, _ ids: MLXArray, _ launch: KernelTuning.Launch) -> MLXArray {
         #if canImport(Metal)
         let d = x.dim(0), i = gate.weight.dim(1), k = ids.dim(0)
-        let caps = self.caps
-        let h = Self.gateUpKernel(
+        let v = supports(launch.values, inputs: d, bits: [gate.bits, up.bits]) ? launch.values : 8
+        return Self.gateUpKernel(
             [x, ids, gate.weight, gate.scales!, gate.biases!, up.weight, up.scales!, up.biases!, caps],
             template: [("T", x.dtype), ("D", d), ("I", i), ("GB", gate.bits), ("GG", gate.groupSize),
-                       ("UB", up.bits), ("UG", up.groupSize)],
-            grid: (32 * i, k, 1), threadGroup: (256, 1, 1),
+                       ("UB", up.bits), ("UG", up.groupSize), ("V", v)],
+            grid: (32 * i, k, 1), threadGroup: (launch.threads, 1, 1),
             outputShapes: [[k * i]], outputDTypes: [x.dtype])[0]
-        return Self.downKernel(
-            [h, ids, w, down.weight, down.scales!, down.biases!],
-            template: [("T", x.dtype), ("D", d), ("I", i), ("K", k), ("DB", down.bits), ("DG", down.groupSize)],
-            grid: (32 * d, 1, 1), threadGroup: (256, 1, 1),
-            outputShapes: [[d]], outputDTypes: [x.dtype])[0]
         #else
         fatalError("Metal kernels need an Apple GPU")
         #endif
+    }
+
+    /// The down kernel with `launch`: [D] weighted sum over the k experts.
+    func downStep(_ h: MLXArray, _ ids: MLXArray, _ w: MLXArray, _ launch: KernelTuning.Launch) -> MLXArray {
+        #if canImport(Metal)
+        let d = down.weight.dim(1), i = gate.weight.dim(1), k = ids.dim(0)
+        let v = supports(launch.values, inputs: i, bits: [down.bits]) ? launch.values : 8
+        return Self.downKernel(
+            [h, ids, w, down.weight, down.scales!, down.biases!],
+            template: [("T", h.dtype), ("D", d), ("I", i), ("K", k), ("DB", down.bits), ("DG", down.groupSize), ("V", v)],
+            grid: (32 * d, 1, 1), threadGroup: (launch.threads, 1, 1),
+            outputShapes: [[d]], outputDTypes: [h.dtype])[0]
+        #else
+        fatalError("Metal kernels need an Apple GPU")
+        #endif
+    }
+
+    /// Wide loads need 4- or 8-bit rows (same width for gate and up), whole lane steps per row, and rows that
+    /// start on the load's alignment (8 or 16 bytes).
+    func supports(_ values: Int, inputs: Int, bits: [Int]) -> Bool {
+        guard values > 8 else { return true }
+        guard let b = bits.first, bits.allSatisfy({ $0 == b }), b == 4 || b == 8, values * b <= 128 else { return false }
+        let bytes = values * b / 8
+        return inputs % values == 0 && (inputs * b / 8) % bytes == 0
     }
 
     #if canImport(Metal)

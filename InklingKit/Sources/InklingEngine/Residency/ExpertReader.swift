@@ -15,52 +15,11 @@ final class ExpertReader: @unchecked Sendable {
     }
 
     static let pieceSize = 1 << 20
-    /// Piece sizes tried on the device; the fastest for the reads a step waits on is used (`choosePieceSize`).
-    static let pieceChoices = [256 << 10, 512 << 10, 1 << 20, 2 << 20]
-    static let samplesPerChoice = 12, exploreEvery = 16
-    private let tuning = NSLock()
-    private var throughput = Array(repeating: (bytes: 0.0, seconds: 0.0, samples: 0), count: ExpertReader.pieceChoices.count)
-    private var choices = 0
-
-    /// Self-tuning: tries every piece size `samplesPerChoice` times, then uses the one with the best measured
-    /// throughput, still trying another every `exploreEvery`-th read. Returns (index, size).
-    func choosePieceSize() -> (Int, Int) {
-        tuning.withLock {
-            choices += 1
-            if let untried = throughput.indices.first(where: { throughput[$0].samples < Self.samplesPerChoice }) {
-                return (untried, Self.pieceChoices[untried])
-            }
-            if choices % Self.exploreEvery == 0 {
-                let i = (choices / Self.exploreEvery) % Self.pieceChoices.count
-                return (i, Self.pieceChoices[i])
-            }
-            let best = throughput.indices.max { throughput[$0].bytes / max(throughput[$0].seconds, 1e-9)
-                < throughput[$1].bytes / max(throughput[$1].seconds, 1e-9) }!
-            return (best, Self.pieceChoices[best])
-        }
-    }
-
-    /// A read with piece size `choice` moved `bytes` in `seconds` (recent reads weigh most).
-    func record(choice: Int, bytes: Int64, seconds: Double) {
-        tuning.withLock {
-            var t = throughput[choice]
-            if t.samples >= Self.samplesPerChoice { t.bytes *= 0.9; t.seconds *= 0.9 }
-            t.bytes += Double(bytes)
-            t.seconds += seconds
-            t.samples += 1
-            throughput[choice] = t
-        }
-    }
-
-    /// The piece size in use (for the Benchmark screen).
-    var preferredPieceSize: Int {
-        tuning.withLock {
-            guard throughput.allSatisfy({ $0.samples >= Self.samplesPerChoice }) else { return Self.pieceSize }
-            let best = throughput.indices.max { throughput[$0].bytes / max(throughput[$0].seconds, 1e-9)
-                < throughput[$1].bytes / max(throughput[$1].seconds, 1e-9) }!
-            return Self.pieceChoices[best]
-        }
-    }
+    /// Picks the piece size for the reads a step waits on.
+    let tuner = PieceTuner()
+    func choosePieceSize() -> (Int, Int) { tuner.choose() }
+    func record(choice: Int, bytes: Int64, seconds: Double) { tuner.record(choice: choice, bytes: bytes, seconds: seconds) }
+    var preferredPieceSize: Int { tuner.preferred }
     static let threads = 32
     static let shared = ExpertReader(threads: threads)
 
@@ -139,5 +98,56 @@ final class ExpertReader: @unchecked Sendable {
             }
         }
         if done < p.length { memcpy(p.destination + done, p.fallback + done, p.length - done) }
+    }
+}
+
+/// Self-tuning read size: tries every piece size `samplesPerChoice` times, then uses the one with the best measured
+/// throughput, still trying another every `exploreEvery`-th read.
+final class PieceTuner: @unchecked Sendable {
+    /// Piece sizes tried on the device; the fastest for the reads a step waits on is used (`choosePieceSize`).
+    static let pieceChoices = [256 << 10, 512 << 10, 1 << 20, 2 << 20]
+    static let samplesPerChoice = 12, exploreEvery = 16
+    private let tuning = NSLock()
+    private var throughput = Array(repeating: (bytes: 0.0, seconds: 0.0, samples: 0), count: PieceTuner.pieceChoices.count)
+    private var choices = 0
+
+    /// Self-tuning: tries every piece size `samplesPerChoice` times, then uses the one with the best measured
+    /// throughput, still trying another every `exploreEvery`-th read. Returns (index, size).
+    func choose() -> (Int, Int) {
+        tuning.withLock {
+            choices += 1
+            if let untried = throughput.indices.first(where: { throughput[$0].samples < Self.samplesPerChoice }) {
+                return (untried, Self.pieceChoices[untried])
+            }
+            if choices % Self.exploreEvery == 0 {
+                let i = (choices / Self.exploreEvery) % Self.pieceChoices.count
+                return (i, Self.pieceChoices[i])
+            }
+            let best = throughput.indices.max { throughput[$0].bytes / max(throughput[$0].seconds, 1e-9)
+                < throughput[$1].bytes / max(throughput[$1].seconds, 1e-9) }!
+            return (best, Self.pieceChoices[best])
+        }
+    }
+
+    /// A read with piece size `choice` moved `bytes` in `seconds` (recent reads weigh most).
+    func record(choice: Int, bytes: Int64, seconds: Double) {
+        tuning.withLock {
+            var t = throughput[choice]
+            if t.samples >= Self.samplesPerChoice { t.bytes *= 0.9; t.seconds *= 0.9 }
+            t.bytes += Double(bytes)
+            t.seconds += seconds
+            t.samples += 1
+            throughput[choice] = t
+        }
+    }
+
+    /// The piece size in use (for the Benchmark screen).
+    var preferred: Int {
+        tuning.withLock {
+            guard throughput.allSatisfy({ $0.samples >= Self.samplesPerChoice }) else { return ExpertReader.pieceSize }
+            let best = throughput.indices.max { throughput[$0].bytes / max(throughput[$0].seconds, 1e-9)
+                < throughput[$1].bytes / max(throughput[$1].seconds, 1e-9) }!
+            return Self.pieceChoices[best]
+        }
     }
 }

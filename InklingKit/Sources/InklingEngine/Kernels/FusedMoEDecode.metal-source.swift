@@ -3,7 +3,8 @@
 
 enum FusedMoESource {
     /// One simdgroup per (expert slot, intermediate row): gate and up dot products, then the softcapped SwiGLU.
-    /// Grid (32*I, K, 1). Template: T, D, I, GB, GG, UB, UG.
+    /// Grid (32*I, K, 1). Template: T, D, I, GB, GG, UB, UG, V (values per lane step: 8, or 16/32 for 4/8-bit rows,
+    /// read with one 8- or 16-byte load; picked on the device by `KernelTuning`).
     static let gateUp = """
         uint gid = thread_position_in_grid.x;
         uint r = gid / 32, lane = gid % 32;
@@ -14,6 +15,37 @@ enum FusedMoESource {
         const device uint8_t* up = (const device uint8_t*)uw + row * (D * UB / 8);
         size_t gsb = row * (D / GG), usb = row * (D / UG);
         float ga = 0.0f, ua = 0.0f;
+        if ((GB == 4 || GB == 8) && GB == UB && V > 8) {
+            constexpr int NB = V / 8, NW = V * GB / 32;  // 8-value blocks and 32-bit words per lane step
+            for (uint c = lane; c < (uint)(D / V); c += 32) {
+                uint gw4[4] = {0, 0, 0, 0}, uw4[4] = {0, 0, 0, 0};
+                const device uint* gq32 = (const device uint*)gp + c * NW;
+                const device uint* uq32 = (const device uint*)up + c * NW;
+                if (NW == 4) {
+                    uint4 a = *(const device uint4*)gq32, b = *(const device uint4*)uq32;
+                    gw4[0] = a.x; gw4[1] = a.y; gw4[2] = a.z; gw4[3] = a.w;
+                    uw4[0] = b.x; uw4[1] = b.y; uw4[2] = b.z; uw4[3] = b.w;
+                } else {
+                    uint2 a = *(const device uint2*)gq32, b = *(const device uint2*)uq32;
+                    gw4[0] = a.x; gw4[1] = a.y; uw4[0] = b.x; uw4[1] = b.y;
+                }
+                for (int bl = 0; bl < NB; ++bl) {
+                    uint c8 = c * NB + bl;
+                    float xv[8]; float xs = 0.0f;
+                    for (int j = 0; j < 8; ++j) { xv[j] = float(x[c8 * 8 + j]); xs += xv[j]; }
+                    ulong gv = GB == 4 ? ulong(gw4[bl]) : (ulong(gw4[(2 * bl) & 3]) | (ulong(gw4[(2 * bl + 1) & 3]) << 32));
+                    ulong uv = UB == 4 ? ulong(uw4[bl]) : (ulong(uw4[(2 * bl) & 3]) | (ulong(uw4[(2 * bl + 1) & 3]) << 32));
+                    float gq = 0.0f, uq = 0.0f;
+                    for (int j = 0; j < 8; ++j) {
+                        gq += float((gv >> (j * GB)) & ((1ul << GB) - 1)) * xv[j];
+                        uq += float((uv >> (j * UB)) & ((1ul << UB) - 1)) * xv[j];
+                    }
+                    uint g = (c8 * 8) / GG, u = (c8 * 8) / UG;
+                    ga += float(gs[gsb + g]) * gq + float(gbias[gsb + g]) * xs;
+                    ua += float(us[usb + u]) * uq + float(ubias[usb + u]) * xs;
+                }
+            }
+        } else
         for (uint c = lane; c < (uint)(D / 8); c += 32) {
             float xv[8]; float xs = 0.0f;
             for (int j = 0; j < 8; ++j) { xv[j] = float(x[c * 8 + j]); xs += xv[j]; }
@@ -45,7 +77,7 @@ enum FusedMoESource {
         """
 
     /// One simdgroup per output row: down dot product for each routed expert, weighted sum in FP32.
-    /// Grid (32*D, 1, 1). Template: T, D, I, K, DB, DG.
+    /// Grid (32*D, 1, 1). Template: T, D, I, K, DB, DG, V (as in `gateUp`).
     static let down = """
         uint gid = thread_position_in_grid.x;
         uint r = gid / 32, lane = gid % 32;
@@ -56,6 +88,25 @@ enum FusedMoESource {
             const device uint8_t* p = (const device uint8_t*)dw + row * (I * DB / 8);
             size_t sb = row * (I / DG);
             float acc = 0.0f;
+            if ((DB == 4 || DB == 8) && V > 8) {
+                constexpr int NB = V / 8, NW = V * DB / 32;
+                for (uint c = lane; c < (uint)(I / V); c += 32) {
+                    uint w4[4] = {0, 0, 0, 0};
+                    const device uint* p32 = (const device uint*)p + c * NW;
+                    if (NW == 4) { uint4 a = *(const device uint4*)p32; w4[0] = a.x; w4[1] = a.y; w4[2] = a.z; w4[3] = a.w; }
+                    else { uint2 a = *(const device uint2*)p32; w4[0] = a.x; w4[1] = a.y; }
+                    for (int bl = 0; bl < NB; ++bl) {
+                        uint c8 = c * NB + bl;
+                        float hv[8]; float hs = 0.0f;
+                        for (int j = 0; j < 8; ++j) { hv[j] = float(h[k * I + c8 * 8 + j]); hs += hv[j]; }
+                        ulong v = DB == 4 ? ulong(w4[bl]) : (ulong(w4[(2 * bl) & 3]) | (ulong(w4[(2 * bl + 1) & 3]) << 32));
+                        float q = 0.0f;
+                        for (int j = 0; j < 8; ++j) q += float((v >> (j * DB)) & ((1ul << DB) - 1)) * hv[j];
+                        uint g = (c8 * 8) / DG;
+                        acc += float(ds[sb + g]) * q + float(dbias[sb + g]) * hs;
+                    }
+                }
+            } else
             for (uint c = lane; c < (uint)(I / 8); c += 32) {
                 float hv[8]; float hs = 0.0f;
                 for (int j = 0; j < 8; ++j) { hv[j] = float(h[k * I + c * 8 + j]); hs += hv[j]; }

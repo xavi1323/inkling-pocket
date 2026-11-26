@@ -92,6 +92,8 @@ public actor InklingGenerator: LanguageModel {
         scratch.pipelined = generator.pipelined
         let lm = paths().reference as? Inkling2LanguageModel
         lm?.smartRouting = smartRouting
+        // Pick the fastest kernel launch settings for this GPU first, so the warm-up builds the chosen ones.
+        if let lm { KernelTuning.shared.tune(lm) }
         let prompt = tokenizer.encode("Hello! Say hi back in one short sentence.")
         guard !prompt.isEmpty else { return }
         _ = try? withError {
