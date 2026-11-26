@@ -1,8 +1,10 @@
 import SwiftUI
 import InklingCore
+import InklingEngine
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
+    @Environment(AppModel.self) private var app
 
     var body: some View {
         @Bindable var settings = settings
@@ -31,6 +33,7 @@ struct SettingsView: View {
                 Picker("Engine", selection: $settings.enginePath) {
                     ForEach(EnginePath.allCases) { Text($0.title).tag($0) }
                 }
+                LabeledContent("Model", value: app.engineStatus.text)
                 LabeledContent("Memory budget") {
                     Stepper(settings.memoryBudgetOverrideGB == 0 ? "Automatic" : String(format: "%.1f GB", settings.memoryBudgetOverrideGB),
                             value: $settings.memoryBudgetOverrideGB, in: 0...12, step: 0.5)

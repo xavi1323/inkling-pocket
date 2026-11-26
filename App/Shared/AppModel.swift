@@ -6,6 +6,21 @@ import CrawlCore
 import PocketCrawler
 import PocketMemory
 import OpenUICore
+import InklingEngine
+
+/// Whether the real model is loaded; chats use the echo model until it is.
+enum EngineStatus: Equatable {
+    case echo, loading, ready, failed(String)
+
+    var text: String {
+        switch self {
+        case .echo: "Not imported (echo model)"
+        case .loading: "Loading…"
+        case .ready: "Inkling 2 Mini, on device"
+        case .failed(let why): "Failed: \(why)"
+        }
+    }
+}
 
 enum SidebarItem: Hashable {
     case chat(UUID)
@@ -25,6 +40,8 @@ final class AppModel {
     @ObservationIgnored let fetcher: any PageFetcher
     @ObservationIgnored private var sessions: [UUID: ChatSession] = [:]
     @ObservationIgnored var model: any LanguageModel = EchoModel()
+    var engineStatus: EngineStatus = .echo
+    @ObservationIgnored private var loadedEngine: (folder: URL, path: EnginePath)?
 
     init() {
         let container = (try? PocketSchema.container()) ?? (try! PocketSchema.container(inMemory: true))
@@ -36,6 +53,36 @@ final class AppModel {
 
     func refreshModelFolder() {
         modelFolder = location.currentModelFolder()
+    }
+
+    /// Loads the real model for the current folder and engine setting (weights are memory-mapped, so this is quick).
+    func loadEngineIfNeeded() async {
+        guard let folder = modelFolder else {
+            model = EchoModel()
+            engineStatus = .echo
+            loadedEngine = nil
+            return
+        }
+        let path = settings.enginePath
+        if let loaded = loadedEngine, loaded.folder == folder, loaded.path == path, engineStatus == .ready { return }
+        guard engineStatus != .loading else { return }
+        engineStatus = .loading
+        do {
+            let engine = try await InklingGenerator(modelFolder: folder, path: path)
+            await engine.setContextLimit(settings.contextCap)
+            model = engine
+            loadedEngine = (folder, path)
+            engineStatus = .ready
+        } catch {
+            model = EchoModel()
+            loadedEngine = nil
+            engineStatus = .failed(String(describing: error))
+        }
+    }
+
+    /// Stops every running generation (e.g. when the app goes to the background).
+    func stopAll() {
+        for session in sessions.values { session.stop() }
     }
 
     func newChat() {

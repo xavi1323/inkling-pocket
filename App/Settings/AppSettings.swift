@@ -1,10 +1,10 @@
 import Foundation
 import Observation
 import InklingCore
+import InklingEngine
 
-enum EnginePath: String, CaseIterable, Identifiable {
-    case fast, reference
-    var id: String { rawValue }
+extension EnginePath: Identifiable {
+    public var id: String { rawValue }
     var title: String { self == .fast ? "Fast (custom Metal)" : "Reference (plain MLX)" }
 }
 

@@ -4,7 +4,7 @@ import MLX
 import InklingCore
 
 /// Reference (portable MLX ops) implementation of the inkling2_loop text model.
-public final class Inkling2LanguageModel {
+public final class Inkling2LanguageModel: CausalLM {
     public let config: InklingTextConfig
     let model: TextModel
     let lmHead: QLinear
@@ -28,7 +28,7 @@ public final class Inkling2LanguageModel {
 
     /// One cache per layer visit (48 for Inkling 2 Mini).
     public func makeCache() -> [LayerVisitCache] {
-        config.layerVisits.map { SimpleVisitCache(window: config.isSliding($0) ? config.slidingWindowSize : nil) }
+        config.layerVisits.map { InklingVisitCache(window: config.isSliding($0) ? config.slidingWindowSize : nil) }
     }
 
     /// Logits [B, L, outputVocabSize] (FP32, softcapped) for token ids [B, L]; advances `cache`.

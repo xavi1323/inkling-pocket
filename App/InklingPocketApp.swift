@@ -1,8 +1,10 @@
 import SwiftUI
+import InklingEngine
 
 @main
 struct InklingPocketApp: App {
     @State private var app = AppModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -10,6 +12,11 @@ struct InklingPocketApp: App {
                 .environment(app)
                 .environment(app.settings)
                 .modelContainer(app.container)
+                .task(id: EngineKey(folder: app.modelFolder, path: app.settings.enginePath)) { await app.loadEngineIfNeeded() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // iOS does not allow GPU work in the background; stop cleanly and keep the partial answer.
+            if phase == .background { app.stopAll() }
         }
         .commands {
             CommandGroup(replacing: .newItem) {
@@ -18,6 +25,11 @@ struct InklingPocketApp: App {
             }
         }
     }
+}
+
+private struct EngineKey: Equatable {
+    var folder: URL?
+    var path: EnginePath
 }
 
 struct RootView: View {

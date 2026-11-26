@@ -17,3 +17,5 @@ DerivedData/
 InklingKit/Tests/CrawlCoreTests/Fixtures/local-pages/
 # tiny random-weight test model (synthetic, 0.5 MB) — not real model weights
 !InklingKit/Tests/InklingEngineTests/Fixtures/tiny-inkling/model.safetensors
+!InklingKit/Tests/InklingEngineTests/Fixtures/tiny-tokenizer/tokenizer.json
+!InklingKit/Tests/InklingEngineTests/Fixtures/tiny-tokenizer/tiktoken/

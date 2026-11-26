@@ -1,0 +1,65 @@
+{
+ "added_tokens": [
+  {
+   "id": 256,
+   "content": "<|message_user|>",
+   "special": true
+  },
+  {
+   "id": 257,
+   "content": "<|message_model|>",
+   "special": true
+  },
+  {
+   "id": 258,
+   "content": "<|message_system|>",
+   "special": true
+  },
+  {
+   "id": 259,
+   "content": "<|message_tool|>",
+   "special": true
+  },
+  {
+   "id": 260,
+   "content": "<|content_text|>",
+   "special": true
+  },
+  {
+   "id": 261,
+   "content": "<|content_thinking|>",
+   "special": true
+  },
+  {
+   "id": 262,
+   "content": "<|content_invoke_tool_json|>",
+   "special": true
+  },
+  {
+   "id": 263,
+   "content": "<|content_xml|>",
+   "special": true
+  },
+  {
+   "id": 264,
+   "content": "<|end_message|>",
+   "special": true
+  },
+  {
+   "id": 200006,
+   "content": "<|content_model_end_sampling|>",
+   "special": true
+  }
+ ],
+ "pre_tokenizer": {
+  "type": "Sequence",
+  "pretokenizers": [
+   {
+    "type": "Split",
+    "pattern": {
+     "Regex": "\\s+|[^\\s]+"
+    }
+   }
+  ]
+ }
+}
