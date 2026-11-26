@@ -80,3 +80,13 @@ import InklingCore
         #expect(InklingGenerator.slots(budget: .max, perSlot: perSlot, config: config) == config.numExperts)
     }
 }
+
+/// iRAM+ lifts the per-app limit, so `os_proc_available_memory` can report most of RAM; the iPad then runs out
+/// system-wide (jetsam log: app at 9.9 GB of 11.6 GB). The budget is capped by physical memory.
+@Test func budgetIsCappedByPhysicalMemory() {
+    let ipad: Int64 = 12_434_000_000  // 11.58 GB
+    #expect(MemoryBudget.budget(available: 10_500_000_000, physical: ipad, overrideGB: nil) == Int64(Double(ipad) * MemoryBudget.physicalShare))
+    #expect(MemoryBudget.budget(available: 5_000_000_000, physical: ipad, overrideGB: nil) == 5_000_000_000 - MemoryBudget.safetyMargin)
+    #expect(MemoryBudget.budget(available: nil, physical: ipad, overrideGB: nil) == MemoryBudget.fallback)
+    #expect(MemoryBudget.budget(available: 10_500_000_000, physical: ipad, overrideGB: 3) == 3_000_000_000)
+}

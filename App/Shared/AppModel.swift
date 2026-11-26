@@ -74,7 +74,10 @@ final class AppModel {
         engineStatus = .loading
         do {
             let override = settings.memoryBudgetOverrideGB
-            let engine = try await InklingGenerator(modelFolder: folder, path: path, memoryBudgetGB: override > 0 ? override : nil)
+            // Detached: loading allocates and fills gigabytes of expert slots; on the main actor it froze the UI.
+            let engine = try await Task.detached(priority: .userInitiated) {
+                try await InklingGenerator(modelFolder: folder, path: path, memoryBudgetGB: override > 0 ? override : nil)
+            }.value
             await engine.setContextLimit(settings.contextCap)
             guard !Task.isCancelled else { return }
             model = engine
