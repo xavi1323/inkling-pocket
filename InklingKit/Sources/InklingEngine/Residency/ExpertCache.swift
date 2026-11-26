@@ -46,7 +46,7 @@ final class ExpertCache: @unchecked Sendable {
     /// Experts read ahead by `prefetch`.
     private(set) var prefetched = 0
     /// Read-ahead experts not used yet (a later hit on one counts as a useful read-ahead).
-    private var unusedPrefetch = Set<Int>()
+    private var unusedPrefetch: [Int: Int] = [:]  // expert → its rank in the guess
     /// Shared by the model's caches; nil = not measured.
     var profile: StreamProfile?
     /// Tests: seconds each read waits first (taken when `ensure`/`prefetch` is called).
@@ -123,6 +123,46 @@ final class ExpertCache: @unchecked Sendable {
     /// Benchmark: experts of this layer not in a slot (a random sample of `count`).
     func notResident(_ count: Int) -> [Int] {
         queue.sync { Array((0..<experts).filter { slotOf[$0] == nil }.shuffled().prefix(count)) }
+    }
+
+    /// Benchmark: `count` reads of `size` contiguous bytes each from the largest expert tensor (random expert-aligned
+    /// starts), `inFlight` at a time. What one read per expert would give if each expert were stored in one piece.
+    /// Returns (bytes, seconds).
+    func probeContiguous(count: Int, size: Int, inFlight: Int) -> (Int, Double) {
+        guard let part = parts.max(by: { $0.stride < $1.stride }) else { return (0, 0) }
+        let fd = open(part.url.path, O_RDONLY)
+        guard fd >= 0 else { return (0, 0) }
+        defer { close(fd) }
+        #if canImport(Darwin)
+        _ = fcntl(fd, F_RDAHEAD, 0)
+        #endif
+        let span = min(size, part.stride * experts)
+        let lastStart = max(experts - (span + part.stride - 1) / part.stride, 0)
+        let starts = (0..<count).map { _ in part.offset + Int64(Int.random(in: 0...lastStart) * part.stride) }
+        var buffer: UnsafeMutableRawPointer?
+        guard posix_memalign(&buffer, 16384, max(count * span, 1)) == 0, let buffer else { return (0, 0) }
+        defer { free(buffer) }
+        let base = UInt(bitPattern: buffer)
+        let gate = DispatchSemaphore(value: inFlight), group = DispatchGroup()
+        let queue = DispatchQueue(label: "inkling.probe", qos: .userInitiated, attributes: .concurrent)
+        let start = StreamProfile.now()
+        for (i, offset) in starts.enumerated() {
+            gate.wait()
+            group.enter()
+            queue.async {
+                let target = UnsafeMutableRawPointer(bitPattern: base + UInt(i * span))!
+                var done = 0
+                while done < span {
+                    let n = pread(fd, target + done, span - done, off_t(offset) + off_t(done))
+                    if n <= 0 { break }
+                    done += n
+                }
+                gate.signal()
+                group.leave()
+            }
+        }
+        group.wait()
+        return (count * span, Double(StreamProfile.now() - start) / 1e9)
     }
 
     /// Benchmark: reads `experts` into a scratch buffer the way slots are filled (all parts at once), through new
@@ -276,8 +316,13 @@ final class ExpertCache: @unchecked Sendable {
             if clock % Self.agingPeriod == 0 { uses = uses.map { $0 / 2 } }
             for e in Set(experts) { uses[e] += 1 }
             hits += map.count
-            let used = map.keys.filter { unusedPrefetch.remove($0) != nil }.count
-            if used > 0 { profile?.update { $0.prefetchUsed += used } }
+            let ranks = map.keys.compactMap { unusedPrefetch.removeValue(forKey: $0) }
+            if !ranks.isEmpty {
+                profile?.update {
+                    $0.prefetchUsed += ranks.count
+                    for r in ranks where r < StreamProfile.ranks { $0.usedByRank[r] += 1 }
+                }
+            }
         }
         var waits: [DispatchGroup] = []
         for s in map.values.map(Int.init) {
@@ -290,9 +335,13 @@ final class ExpertCache: @unchecked Sendable {
             if let g = loading[s] { evicted.append(g) }
             if let old = expertIn[s] {
                 slotOf[old] = nil
-                unusedPrefetch.remove(old)
+                unusedPrefetch.removeValue(forKey: old)
             }
-            if !counting { unusedPrefetch.insert(e) }
+            if !counting {
+                let rank = experts.firstIndex(of: e) ?? 0
+                unusedPrefetch[e] = rank
+                if rank < StreamProfile.ranks { profile?.update { $0.prefetchedByRank[rank] += 1 } }
+            }
             expertIn[s] = e
             slotOf[e] = s
             lastUse[s] = clock

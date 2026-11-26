@@ -182,7 +182,9 @@ import InklingCore
             let (bytes, seconds) = cache.probeRead(picked, direct: false, chunk: chunk)
             #expect(bytes == 2 * perExpert && seconds >= 0)
         }
-        #expect(InklingGenerator.storageSpeeds(model.expertCaches).contains("no file cache"))
+        let (bytes, _) = cache.probeContiguous(count: 3, size: 1000, inFlight: 2)
+        #expect(bytes == 3000)
+        #expect(InklingGenerator.storageSpeeds(model.expertCaches).contains("4 MB reads ×32"))
     }
 
     /// The benchmark's time breakdown counts every expert read.
@@ -198,6 +200,8 @@ import InklingCore
         #expect(p.prefetchUsed <= p.prefetched)
         #expect(p.readBytes > 0 && p.gpuWait > 0 && p.expertWait > 0)
         #expect(p.summary(tokens: 40, seconds: 1).contains("misses"))
+        #expect(p.prefetchedByRank.reduce(0, +) == p.prefetched && p.usedByRank.reduce(0, +) == p.prefetchUsed)
+        #expect(p.rankSummary.hasPrefix("#1 "))
     }
 
     @Test func streamedModelHoldsOnlySlots() throws {

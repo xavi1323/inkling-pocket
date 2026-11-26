@@ -12,14 +12,19 @@ final class StreamProfile: @unchecked Sendable {
         var prefetchUsed = 0         // read-ahead experts a later step used
         var readBytes: Int64 = 0
         var readTime: UInt64 = 0     // ns spent in reads (summed over fills; fills of different layers overlap)
+        var prefetchedByRank = Array(repeating: 0, count: StreamProfile.ranks)  // read ahead, by rank in the guess
+        var usedByRank = Array(repeating: 0, count: StreamProfile.ranks)
 
         static func - (a: Snapshot, b: Snapshot) -> Snapshot {
             Snapshot(gpuWait: a.gpuWait - b.gpuWait, expertWait: a.expertWait - b.expertWait, misses: a.misses - b.misses,
                      prefetched: a.prefetched - b.prefetched, prefetchUsed: a.prefetchUsed - b.prefetchUsed,
-                     readBytes: a.readBytes - b.readBytes, readTime: a.readTime - b.readTime)
+                     readBytes: a.readBytes - b.readBytes, readTime: a.readTime - b.readTime,
+                     prefetchedByRank: zip(a.prefetchedByRank, b.prefetchedByRank).map { $0 - $1 },
+                     usedByRank: zip(a.usedByRank, b.usedByRank).map { $0 - $1 })
         }
     }
 
+    static let ranks = 8
     private let lock = NSLock()
     private var s = Snapshot()
 
@@ -39,6 +44,14 @@ final class StreamProfile: @unchecked Sendable {
 }
 
 extension StreamProfile.Snapshot {
+    /// Share of read-ahead experts used, by their rank in the guess ("1st 80% (n) · …").
+    var rankSummary: String {
+        zip(prefetchedByRank, usedByRank).enumerated().map { i, pair in
+            let (read, used) = pair
+            return "#\(i + 1) " + (read > 0 ? String(format: "%.0f%%", Double(used) / Double(read) * 100) : "–") + " of \(read)"
+        }.joined(separator: " · ")
+    }
+
     /// One line: per token when `tokens` > 0, else totals.
     func summary(tokens: Int, seconds: Double) -> String {
         let n = Double(max(tokens, 1))

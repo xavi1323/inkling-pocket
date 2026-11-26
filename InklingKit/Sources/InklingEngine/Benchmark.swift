@@ -30,6 +30,7 @@ public struct BenchmarkReport: Sendable, Equatable {
     /// Where streaming time went (empty when not streaming).
     public var prefillProfile = ""
     public var decodeProfile = ""
+    public var guessRanks = ""
     /// Decode speed with no routing waits or expert reads (streaming only).
     public var ceiling = ""
     /// Expert read speed from storage, by read style.
@@ -53,6 +54,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Thermal: \(thermalState)",
             "Prefill time (whole prompt): \(prefillProfile.isEmpty ? "n/a" : prefillProfile)",
             "Decode time per token: \(decodeProfile.isEmpty ? "n/a" : decodeProfile)",
+            "Read-ahead used, by guess rank: \(guessRanks.isEmpty ? "n/a" : guessRanks)",
             "Decode ceiling (no routing waits or reads): \(ceiling.isEmpty ? "n/a" : ceiling)",
             "Storage reads: \(storage.isEmpty ? "n/a" : storage)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
@@ -122,6 +124,17 @@ extension InklingGenerator {
             }
             parts.append("\(style.0) " + String(format: "%.2f GB/s", seconds > 0 ? Double(bytes) / seconds / 1e9 : 0))
         }
+        // One contiguous read per expert (if each expert were stored in one piece), 9 and 32 reads in flight.
+        let size = 4 << 20
+        for inFlight in [9, 32] {
+            var bytes = 0, seconds = 0.0
+            for cache in caches {
+                let (b, s) = cache.probeContiguous(count: 2, size: size, inFlight: inFlight)
+                bytes += b
+                seconds += s
+            }
+            parts.append("4 MB reads ×\(inFlight) " + String(format: "%.2f GB/s", seconds > 0 ? Double(bytes) / seconds / 1e9 : 0))
+        }
         return parts.joined(separator: ", ")
     }
 
@@ -165,7 +178,9 @@ extension InklingGenerator {
             report.prefillProfile = (afterPrefill - before).summary(tokens: 1, seconds: prefillSeconds)
             let steps = max(gen.stats.generatedTokens - 1, 1)
             let decodeSeconds = gen.stats.decodeTokensPerSecond > 0 ? Double(steps) / gen.stats.decodeTokensPerSecond : 0
-            report.decodeProfile = (profile.snapshot - afterPrefill).summary(tokens: steps, seconds: decodeSeconds)
+            let decode = profile.snapshot - afterPrefill
+            report.decodeProfile = decode.summary(tokens: steps, seconds: decodeSeconds)
+            report.guessRanks = decode.rankSummary
         }
         if let lm = reference as? Inkling2LanguageModel, profile != nil {
             progress("Measuring the decode ceiling…")
