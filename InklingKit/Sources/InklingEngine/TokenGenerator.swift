@@ -117,8 +117,12 @@ public final class TokenGenerator {
     /// Tokens of the kept stable prefix, if any.
     var prefixTokens: [Int32]? { prefixMark?.tokens }
 
-    /// Saves the kept stable prefix's cache state (nothing to save → no file written).
+    /// Saves the kept stable prefix's cache state (nothing to save → no file written). MLX errors are thrown.
     func savePrefix(to url: URL, identity: String) throws {
+        try withError { try savePrefixUnchecked(to: url, identity: identity) }
+    }
+
+    private func savePrefixUnchecked(to url: URL, identity: String) throws {
         guard let prefixMark else { return }
         var arrays: [String: MLXArray] = [:]
         var meta = ["identity": identity, "tokens": prefixMark.tokens.map(String.init).joined(separator: ","),
@@ -133,8 +137,13 @@ public final class TokenGenerator {
     }
 
     /// Loads a saved stable prefix when it was saved for `identity` and starts `prompt`; returns whether it did.
+    /// MLX errors are thrown.
     @discardableResult
     func loadPrefix(from url: URL, identity: String, ifPrefixOf prompt: [Int32]) throws -> Bool {
+        try withError { try loadPrefixUnchecked(from: url, identity: identity, ifPrefixOf: prompt) }
+    }
+
+    private func loadPrefixUnchecked(from url: URL, identity: String, ifPrefixOf prompt: [Int32]) throws -> Bool {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let (arrays, meta) = try loadArraysAndMetadata(url: url)
         guard meta["identity"] == identity, let list = meta["tokens"], meta["visits"] == "\(cache.count)" else { return false }

@@ -137,20 +137,11 @@ public actor InklingGenerator: LanguageModel {
     private func run(_ messages: [ChatMessage], _ tools: [ToolSpec], _ effort: ReasoningEffort,
                      _ parameters: GenerateParameters, _ out: AsyncThrowingStream<ModelEvent, Error>.Continuation) throws {
         let prompt = tokenizer.encode(PromptFormatter.render(messages: messages, tools: tools, effort: effort))
-        // Tools + leading system messages + effort line are the same for every chat with these settings.
-        let leading = Array(messages.prefix { $0.role == .system })
-        let head = tokenizer.encode(PromptFormatter.render(messages: leading, tools: tools, effort: effort))
-        let stablePrefix = !leading.isEmpty && head.count < prompt.count && prompt.starts(with: head) ? head.count : 0
+        let stablePrefix = Self.stablePrefixLength(prompt, messages, tools, effort, tokenizer)
         guard prompt.count < generator.contextLimit else {
             throw GenerationError.contextFull(prompt: prompt.count, limit: generator.contextLimit)
         }
-        // First turn after launch: start from the instructions' saved cache state when it matches.
-        if let url = promptCacheURL, !triedSavedPrefix, generator.prefixTokens == nil {
-            triedSavedPrefix = true
-            if (try? withError { try generator.loadPrefix(from: url, identity: promptCacheIdentity, ifPrefixOf: prompt) }) == true {
-                savedPrefix = generator.prefixTokens
-            }
-        }
+        restoreSavedPrefix(for: prompt)
         // MLX errors become a thrown error (shown in the chat) instead of crashing the app.
         let generator = self.generator, tokenizer = self.tokenizer
         let ended = try withError { () -> Bool in
@@ -171,9 +162,32 @@ public actor InklingGenerator: LanguageModel {
         }
         stats = generator.stats
         if !Task.isCancelled, !ended { out.yield(.end) }
-        // New instructions state (first launch, or the date or memory changed): keep it for the next launch.
-        if let url = promptCacheURL, let tokens = generator.prefixTokens, tokens != savedPrefix {
-            if (try? withError { try generator.savePrefix(to: url, identity: promptCacheIdentity) }) != nil { savedPrefix = tokens }
+        keepPrefixForNextLaunch()
+    }
+
+    /// Tokens of tools + leading system messages + effort line: the same for every chat with these settings.
+    static func stablePrefixLength(_ prompt: [Int32], _ messages: [ChatMessage], _ tools: [ToolSpec], _ effort: ReasoningEffort,
+                                   _ tokenizer: InklingTokenizer) -> Int {
+        let leading = Array(messages.prefix { $0.role == .system })
+        guard !leading.isEmpty else { return 0 }
+        let head = tokenizer.encode(PromptFormatter.render(messages: leading, tools: tools, effort: effort))
+        return head.count < prompt.count && prompt.starts(with: head) ? head.count : 0
+    }
+
+    /// First turn after launch: start from the instructions' saved cache state when it matches.
+    private func restoreSavedPrefix(for prompt: [Int32]) {
+        guard let url = promptCacheURL, !triedSavedPrefix, generator.prefixTokens == nil else { return }
+        triedSavedPrefix = true
+        let identity = promptCacheIdentity
+        if (try? generator.loadPrefix(from: url, identity: identity, ifPrefixOf: prompt)) == true {
+            savedPrefix = generator.prefixTokens
         }
+    }
+
+    /// New instructions state (first launch, or the date or memory changed): keep it for the next launch.
+    private func keepPrefixForNextLaunch() {
+        guard let url = promptCacheURL, let tokens = generator.prefixTokens, tokens != savedPrefix else { return }
+        let identity = promptCacheIdentity
+        if (try? generator.savePrefix(to: url, identity: identity)) != nil { savedPrefix = tokens }
     }
 }
