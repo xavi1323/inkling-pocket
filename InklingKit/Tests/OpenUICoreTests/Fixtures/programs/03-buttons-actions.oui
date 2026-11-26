@@ -1,0 +1,3 @@
+root = Card([q, choices])
+q = "Which plan do you want?"
+choices = Buttons([Button("Basic"), Button("Pro", @ToAssistant("I pick Pro", {tier: 2}), "primary"), Button("Docs", @OpenUrl("https://example.com/docs"))])

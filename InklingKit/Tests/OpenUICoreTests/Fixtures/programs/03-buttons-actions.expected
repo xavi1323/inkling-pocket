@@ -1,0 +1,1 @@
+Card(children: ["Which plan do you want?", Buttons(buttons: [Button(label: "Basic"), Button(label: "Pro", action: @ToAssistant("I pick Pro", {tier: 2}), style: "primary"), Button(label: "Docs", action: @OpenUrl("https://example.com/docs"))])])

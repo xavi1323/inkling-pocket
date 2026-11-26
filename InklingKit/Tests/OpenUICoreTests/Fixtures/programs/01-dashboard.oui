@@ -1,0 +1,4 @@
+root = Card([title, kpis, chart], "Weekly sales")
+title = Callout("Sales grew 12% this week.", "success")
+kpis = Table(["Day", "Sales"], [["Mon", 120], ["Tue", 135.5]])
+chart = Chart("bar", ["Mon", "Tue"], [{name: "Sales", values: [120, 135.5]}])

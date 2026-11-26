@@ -1,0 +1,1 @@
+Form(id: "trip", fields: [Field(name: "destination", label: "Where to?", kind: "text", placeholder: "City"), Field(name: "nights", label: "Nights", kind: "number"), Field(name: "notes", label: "Anything else?", kind: "multiline")], submitLabel: "Plan it")

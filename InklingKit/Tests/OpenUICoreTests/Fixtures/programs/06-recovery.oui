@@ -1,0 +1,3 @@
+root = Card([note, mystery, Gauge(5), missing, Callout(), Callout("Kept", "info", "Heads up", "extra")])
+note = Callout("Note: \"quoted\" text\nline two", "warning")
+mystery = Widget("x")

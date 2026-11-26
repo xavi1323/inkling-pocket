@@ -1,0 +1,5 @@
+// trip planner form
+root = Form("trip", [dest, nights, notes], "Plan it")
+dest = Field("destination", "Where to?", "text", null, "City")  # placeholder
+nights = Field("nights", "Nights", "number")
+notes = Field("notes", "Anything else?", "multiline")

@@ -1,0 +1,6 @@
+$detailed = false
+root = $detailed
+  ? full
+  : short
+full = Card([Steps(["Plan", "Build", "Ship"], 2)])
+short = Card(["Three steps: plan, build, ship."])

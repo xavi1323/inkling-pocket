@@ -1,0 +1,3 @@
+root = Card([List(items, true), total, Image("https://example.com/a.png", "A chart"), CodeBlock("let x = 1", "swift")], "Count: " + @Count(items))
+items = ["alpha", "beta", "gamma"]
+total = "Total " + (2 + 3) * 2

@@ -1,0 +1,1 @@
+Card(children: [Callout(text: "Sales grew 12% this week.", kind: "success"), Table(columns: ["Day", "Sales"], rows: [["Mon", 120], ["Tue", 135.5]]), Chart(type: "bar", labels: ["Mon", "Tue"], series: [{name: "Sales", values: [120, 135.5]}])], title: "Weekly sales")
