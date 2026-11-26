@@ -96,7 +96,6 @@ final class SparseMoE {
         var unique: [Int] = []
         var seen = Set<Int>()
         for id in ids where seen.insert(Int(id)).inserted { unique.append(Int(id)) }
-        if unique.count > cache.slots { unique = cache.residentFirst(unique) }  // the first group then reads nothing
         if unique.count <= cache.slots {
             let map = cache.ensure(unique)
             let out = experts(x, MLXArray(ids.map { map[Int($0)]! }).reshaped(indices.shape), weights, fast: fast)
@@ -104,12 +103,17 @@ final class SparseMoE {
             return out
         }
         // More experts than slots (long prompt chunks): run them in groups, each over only the routes it serves.
+        // The experts already in a slot go first; then the missing ones in batches of at most half the slots, each
+        // read into slots the batch still on the GPU does not use, so reading overlaps the GPU.
         let k = indices.dim(-1)
         let flatX = x.reshaped([b * length, d]), flatW = weights.reshaped([-1])
         var total = MLXArray.zeros([b * length, d], dtype: .float32)
-        for start in stride(from: 0, to: unique.count, by: cache.slots) {
-            if start > 0 { eval(total) }  // the slots are about to be refilled
-            let map = cache.ensure(Array(unique[start..<min(start + cache.slots, unique.count)]))
+        let resident = cache.resident(unique)
+        var missing = unique.filter { !resident.contains($0) }
+        var inFlight: [(slots: Set<Int>, done: MLXArray)] = []  // queued batches, oldest first
+        func run(_ group: [Int]) {
+            let busy = inFlight.reduce(into: Set<Int>()) { $0.formUnion($1.slots) }
+            let map = cache.ensure(group, avoiding: busy)
             var routes: [(position: Int32, slot: Int32)] = []
             for (i, id) in ids.enumerated() { if let s = map[Int(id)] { routes.append((Int32(i), s)) } }
             routes.sort { $0.slot < $1.slot }
@@ -121,6 +125,23 @@ final class SparseMoE {
             let down = downProj(activation(up: up, gate: gate), slots, sorted: true).reshaped([routes.count, d])
             let w = take(flatW, MLXArray(routes.map(\.position)), axis: 0).expandedDimensions(axis: -1)
             total = total.at[tokens].add(down.asType(.float32) * w)
+            asyncEval(total)
+            inFlight.append((Set(map.values.map(Int.init)), total))
+        }
+        let firstGroup = unique.filter { resident.contains($0) }
+        if !firstGroup.isEmpty { run(firstGroup) }
+        let batch = max(cache.slots / 2, 1)
+        while !missing.isEmpty {
+            // Free enough slots: wait for the oldest batches (the GPU keeps running the newer one meanwhile).
+            while let oldest = inFlight.first,
+                  cache.slots - inFlight.reduce(into: Set<Int>(), { $0.formUnion($1.slots) }).count < min(batch, missing.count) {
+                eval(oldest.done)
+                inFlight.removeFirst()
+            }
+            let busy = inFlight.reduce(into: Set<Int>()) { $0.formUnion($1.slots) }.count
+            let group = Array(missing.prefix(min(batch, cache.slots - busy)))
+            missing.removeFirst(group.count)
+            run(group)
         }
         return total.reshaped([b, length, d]).asType(x.dtype)
     }

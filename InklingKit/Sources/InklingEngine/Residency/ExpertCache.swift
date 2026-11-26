@@ -239,18 +239,19 @@ final class ExpertCache: @unchecked Sendable {
 
     /// Puts `experts` (at most `slots` distinct ids) into slots, reading the missing ones; returns expert → slot.
     /// Waits only for read-aheads of experts it needs (or, when read-aheads hold every free slot, for them all).
-    func ensure(_ experts: [Int]) -> [Int: Int32] {
+    /// `avoiding`: slots queued GPU work still reads; missing experts go elsewhere.
+    func ensure(_ experts: [Int], avoiding: Set<Int> = []) -> [Int: Int32] {
         precondition(Set(experts).count <= slots, "more experts than slots")
-        guard let profile else { return ensureUnmeasured(experts) }
-        return profile.time(\.expertWait) { ensureUnmeasured(experts) }
+        guard let profile else { return ensureUnmeasured(experts, avoiding: avoiding) }
+        return profile.time(\.expertWait) { ensureUnmeasured(experts, avoiding: avoiding) }
     }
 
-    private func ensureUnmeasured(_ experts: [Int]) -> [Int: Int32] {
+    private func ensureUnmeasured(_ experts: [Int], avoiding: Set<Int>) -> [Int: Int32] {
         let group = DispatchGroup()
         group.enter()
         var reservation: Reservation?
         while reservation == nil {
-            reservation = queue.sync { reserve(experts, counting: true, group: group) }
+            reservation = queue.sync { reserve(experts, counting: true, group: group, avoiding: avoiding) }
             if reservation == nil { for g in queue.sync(execute: { Array(loading.values) }) { g.wait() } }
         }
         let r = reservation!
@@ -266,6 +267,11 @@ final class ExpertCache: @unchecked Sendable {
     /// reads each missing expert once and never evicts one a later group needs.
     func residentFirst(_ experts: [Int]) -> [Int] {
         queue.sync { experts.filter { slotOf[$0] != nil } + experts.filter { slotOf[$0] == nil } }
+    }
+
+    /// Which of `experts` are in a slot now.
+    func resident(_ experts: [Int]) -> Set<Int> {
+        queue.sync { Set(experts.filter { slotOf[$0] != nil }) }
     }
 
     /// Reads experts in the background (a guess at what the next step needs). Only call while no queued GPU work
@@ -305,14 +311,15 @@ final class ExpertCache: @unchecked Sendable {
     /// On `queue`: maps `experts` to slots, claiming the least-used free slots for missing ones (marked loading
     /// under `group`). A step (`counting`) may take a slot a read-ahead is still filling (it waits for that read
     /// first); a read-ahead never does. Nil, changing nothing, when too few slots are free.
-    private func reserve(_ experts: [Int], counting: Bool, group: DispatchGroup, ranks: [Int: Int] = [:]) -> Reservation? {
+    private func reserve(_ experts: [Int], counting: Bool, group: DispatchGroup, ranks: [Int: Int] = [:],
+                         avoiding: Set<Int> = []) -> Reservation? {
         var map: [Int: Int32] = [:]
         var missing: [Int] = []
         for e in experts where map[e] == nil {
             if let s = slotOf[e] { map[e] = Int32(s) } else if !missing.contains(e) { missing.append(e) }
         }
         let held = Set(map.values.map(Int.init))
-        let free = missing.isEmpty ? [] : (0..<slots).filter { !held.contains($0) && (counting || loading[$0] == nil) }.sorted { a, b in
+        let free = missing.isEmpty ? [] : (0..<slots).filter { !held.contains($0) && !avoiding.contains($0) && (counting || loading[$0] == nil) }.sorted { a, b in
             let ua = expertIn[a].map { uses[$0] } ?? -1, ub = expertIn[b].map { uses[$0] } ?? -1
             return ua != ub ? ua < ub : lastUse[a] < lastUse[b]
         }

@@ -40,11 +40,25 @@ import InklingCore
     }
 
     /// A long chunk needs more experts than there are slots: they are run in batches.
-    @Test func batchedPrefillMatches() throws {
+    /// Batches overlap: the next batch's experts are read while the GPU runs the current one.
+    @Test(arguments: [3, 4, 7]) func batchedPrefillMatches(slots: Int) throws {
         let a = TokenGenerator(model: try Tiny.model(), eos: []).prefill(tokens)
-        let b = TokenGenerator(model: try Self.streamed(slots: 3), eos: []).prefill(tokens)
+        let model = try Self.streamed(slots: slots)
+        let b = TokenGenerator(model: model, eos: []).prefill(tokens)
         let scale = abs(a).max().item(Float.self)
         #expect(abs(a - b).max().item(Float.self) <= 1e-2 * max(scale, 1))
+    }
+
+    /// A step can keep slots off-limits (those a running batch still reads): new experts go elsewhere.
+    @Test func ensureLeavesAvoidedSlotsAlone() throws {
+        let weights = try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")])
+        let cache = try ExpertCache(path: "model.layers.0.mlp", weights: weights, quant: try Tiny.config().quantization,
+                                    prefix: "language_model.", slots: 4)
+        let first = cache.ensure([0, 1, 2, 3])
+        let busy = Set([first[0]!, first[1]!].map(Int.init))
+        let map = cache.ensure([4, 5], avoiding: busy)
+        #expect(cache.slot(of: 0) != nil && cache.slot(of: 1) != nil)
+        #expect(!busy.contains(Int(map[4]!)) && !busy.contains(Int(map[5]!)))
     }
 
     @Test func slotsHoldTheRightExpertAndEvictLeastRecent() throws {
