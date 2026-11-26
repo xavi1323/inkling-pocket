@@ -42,11 +42,16 @@ public actor InklingGenerator: LanguageModel {
         self.path = path
         mappedWeightBytes = mappedBytes
         self.residency = residency
-        generator = TokenGenerator(model: model, eos: [tokenizer.eosID])
+        if path == .fast, let lm = model as? Inkling2LanguageModel {
+            generator = TokenGenerator(model: FastPath(lm), eos: [tokenizer.eosID])
+            generator.pipelined = true
+        } else {
+            generator = TokenGenerator(model: model, eos: [tokenizer.eosID])
+        }
         if let residency, let lm = model as? Inkling2LanguageModel, let collector = lm.collector {
             let visits = lm.config.layerVisits
-            generator.afterStep = { [weak self] in
-                for (visit, experts) in collector.drain() {
+            generator.afterStep = { [weak self] inFlight in
+                for (visit, experts) in collector.drain(keepingLatest: inFlight) {
                     residency.record(layer: visits[visit], experts: experts)
                     residency.prefetch(layer: visits[visit], experts: experts)
                 }
@@ -55,8 +60,12 @@ public actor InklingGenerator: LanguageModel {
         }
     }
 
-    /// (reference, fast) models over the same weights. The fast path arrives in Task 20; until then both are the reference.
-    func paths() -> (reference: CausalLM, fast: CausalLM) { (generator.model, generator.model) }
+    /// (reference, fast) models over the same weights; test models without the Inkling layers use themselves for both.
+    func paths() -> (reference: CausalLM, fast: CausalLM) {
+        if let fast = generator.model as? FastPath { return (fast.base, fast) }
+        if let lm = generator.model as? Inkling2LanguageModel { return (lm, FastPath(lm)) }
+        return (generator.model, generator.model)
+    }
 
     /// Re-picks pinned experts every 32 steps.
     nonisolated private func noteStep() {

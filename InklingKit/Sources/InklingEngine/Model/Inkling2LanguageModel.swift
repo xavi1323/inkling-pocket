@@ -43,7 +43,12 @@ public final class Inkling2LanguageModel: CausalLM {
 
     /// Logits [B, L, outputVocabSize] (FP32, softcapped) for token ids [B, L]; advances `cache`.
     public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
-        let h = model(tokens, cache: cache)
+        callAsFunction(tokens, cache: cache, fast: false)
+    }
+
+    /// `fast`: single-token steps use the fused MoE kernels.
+    public func callAsFunction(_ tokens: MLXArray, cache: [LayerVisitCache]?, fast: Bool) -> MLXArray {
+        let h = model(tokens, cache: cache, fast: fast)
         // Round through the embedding dtype like the reference, then project in FP32.
         let normed = Ops.rmsNorm(h, weight: model.norm, eps: config.rmsNormEps)
             .asType(model.embedNorm.dtype).asType(.float32)

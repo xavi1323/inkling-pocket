@@ -5,8 +5,15 @@ enum Ops {
     /// `mx.fast.rms_norm`: normalise in FP32, cast to result_type(x, weight), then scale by weight.
     static func rmsNorm(_ x: MLXArray, weight: MLXArray?, eps: Float) -> MLXArray {
         #if canImport(Metal)
-        if let weight { return MLXFast.rmsNorm(x, weight: weight, eps: eps) }
+        if useFused, let weight { return MLXFast.rmsNorm(x, weight: weight, eps: eps) }
         #endif
+        return rmsNormPortable(x, weight: weight, eps: eps)
+    }
+
+    /// Use `MLXFast` kernels where they exist (off on the CPU device: they are only checked against Python on Metal).
+    static var useFused: Bool { Device.defaultDevice().deviceType == .gpu }
+
+    static func rmsNormPortable(_ x: MLXArray, weight: MLXArray?, eps: Float) -> MLXArray {
         let outType = weight.map { promote(x.dtype, $0.dtype) } ?? x.dtype
         let xf = x.asType(.float32)
         var y = (xf * rsqrt(mean(square(xf), axis: -1, keepDims: true) + eps)).asType(outType)
@@ -23,8 +30,12 @@ enum Ops {
     /// `mx.fast.scaled_dot_product_attention` with an additive mask; q [B,Hq,L,D], k/v [B,Hkv,S,D], mask [B,Hq,L,S].
     static func attention(q: MLXArray, k: MLXArray, v: MLXArray, scale: Float, mask: MLXArray) -> MLXArray {
         #if canImport(Metal)
-        return MLXFast.scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: mask)
-        #else
+        if useFused { return MLXFast.scaledDotProductAttention(queries: q, keys: k, values: v, scale: scale, mask: mask) }
+        #endif
+        return attentionPortable(q: q, k: k, v: v, scale: scale, mask: mask)
+    }
+
+    static func attentionPortable(q: MLXArray, k: MLXArray, v: MLXArray, scale: Float, mask: MLXArray) -> MLXArray {
         let (b, hq, l, d) = (q.dim(0), q.dim(1), q.dim(2), q.dim(3))
         let hkv = k.dim(1), rep = hq / hkv
         var q = MLXArray(scale).asType(q.dtype) * q
@@ -40,7 +51,6 @@ enum Ops {
         scores = softmax(scores, axis: -1, precise: true)
         let out = matmul(scores, v)
         return rep > 1 ? out.reshaped([b, hq, l, d]) : out
-        #endif
     }
 
     /// `l2_clip`: scale rows so their L2 norm is at most `threshold` (FP32 inside).

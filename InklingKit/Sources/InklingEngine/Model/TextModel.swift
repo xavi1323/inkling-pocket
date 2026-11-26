@@ -32,7 +32,7 @@ final class TextModel {
     }
 
     /// Hidden state before the final norm, [B, L, D] FP32.
-    func callAsFunction(_ inputs: MLXArray, cache: [LayerVisitCache]?) -> MLXArray {
+    func callAsFunction(_ inputs: MLXArray, cache: [LayerVisitCache]?, fast: Bool = false) -> MLXArray {
         var x = embed(inputs)
         var blocks: [MLXArray] = []
         var bank: MLXArray?
@@ -64,8 +64,9 @@ final class TextModel {
                     collector?.add(visit: visit, experts: experts)
                 }
             }
-            x = layers[index](x, blocks: &blocks, cache: cache?[visit], messages: messages, onRoute: onRoute)
+            x = layers[index](x, blocks: &blocks, cache: cache?[visit], messages: messages, onRoute: onRoute, fast: fast)
         }
+        collector?.endPass()
         return Ops.pick(finalInput(blocks, x), 0)
     }
 }

@@ -94,7 +94,8 @@ extension InklingGenerator {
     /// Times a ~`promptTokens` prefill and `decodeTokens` greedy decode (EOS ignored), then records routing on a short pass.
     public func benchmark(promptTokens: Int = 512, decodeTokens: Int = 256,
                           progress: @escaping @Sendable (String) -> Void = { _ in }) throws -> BenchmarkReport {
-        let (model, _) = paths()
+        let (reference, fast) = paths()
+        let model = path == .fast ? fast : reference
         let paragraph = "The quick brown fox jumps over the lazy dog while the iPad keeps every token on device. "
         var tokens = tokenizer.encode(String(repeating: paragraph, count: max(1, promptTokens / 16 + 1)))
         tokens = Array(tokens.prefix(promptTokens))
@@ -102,6 +103,7 @@ extension InklingGenerator {
         greedy.temperature = 0
         progress("Prefill \(tokens.count) tokens, decode \(decodeTokens)…")
         let gen = TokenGenerator(model: model, eos: [])
+        gen.pipelined = generator.pipelined
         gen.generate(prompt: tokens, sampler: Sampler(greedy), maxTokens: decodeTokens, shouldStop: { Task.isCancelled }, onToken: { _ in })
         try Task.checkCancellation()
         var report = BenchmarkReport()
@@ -117,7 +119,7 @@ extension InklingGenerator {
         report.mappedWeightBytes = mappedWeightBytes
         report.thermalState = MemoryInfo.thermalState()
         report.expertHitRate = residency?.hitRate
-        if let lm = model as? Inkling2LanguageModel {
+        if let lm = reference as? Inkling2LanguageModel {
             progress("Recording expert routing…")
             let stats = RoutingStats(visits: lm.config.layerVisits, numExperts: lm.config.numExperts)
             lm.routing = stats

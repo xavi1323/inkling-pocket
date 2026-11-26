@@ -3,13 +3,21 @@ import MLX
 
 /// Keeps routed-expert id arrays from a forward pass without reading them back; drain after the pass is evaluated.
 public final class RouteCollector {
-    private(set) var items: [(visit: Int, experts: MLXArray)] = []
+    private var current: [(visit: Int, experts: MLXArray)] = []
+    private var passes: [[(visit: Int, experts: MLXArray)]] = []
     public init() {}
-    func add(visit: Int, experts: MLXArray) { items.append((visit, experts)) }
-    /// (visit, distinct expert ids) for everything collected since the last drain.
-    public func drain() -> [(visit: Int, experts: [Int])] {
-        defer { items.removeAll(keepingCapacity: true) }
-        return items.map { ($0.visit, Array(Set($0.experts.asType(.int32).reshaped([-1]).asArray(Int32.self).map(Int.init))).sorted()) }
+    func add(visit: Int, experts: MLXArray) { current.append((visit, experts)) }
+    /// Closes one forward pass.
+    func endPass() {
+        if !current.isEmpty { passes.append(current) }
+        current = []
+    }
+    /// (visit, distinct expert ids) of every finished pass except the newest `keepingLatest` (still running on the GPU).
+    public func drain(keepingLatest: Int = 0) -> [(visit: Int, experts: [Int])] {
+        let count = max(0, passes.count - keepingLatest)
+        let done = passes.prefix(count).flatMap { $0 }
+        passes.removeFirst(count)
+        return done.map { ($0.visit, Array(Set($0.experts.asType(.int32).reshaped([-1]).asArray(Int32.self).map(Int.init))).sorted()) }
     }
 }
 

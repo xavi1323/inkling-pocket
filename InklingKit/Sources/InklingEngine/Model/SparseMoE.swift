@@ -9,6 +9,8 @@ final class SparseMoE {
     let gateProj, upProj, downProj: QSwitchLinear
     let topK: Int
     let routeScale, gateCap, upCap: Float
+    /// Single-token kernels over the same weights (fast path).
+    lazy var fused = FusedMoEDecode(gate: gateProj.linear, up: upProj.linear, down: downProj.linear, gateCap: gateCap, upCap: upCap)
 
     init(_ config: InklingTextConfig, path: String, loader: WeightLoader) throws {
         gateWeight = try loader.tensor(path + ".gate_weight")
@@ -36,10 +38,13 @@ final class SparseMoE {
         return (tanh(g / gateCap) * gateCap * sigmoid(g) * tanh(u / upCap) * upCap).asType(gate.dtype)
     }
 
-    func callAsFunction(_ x: MLXArray, onRoute: ((MLXArray) -> Void)? = nil) -> MLXArray {
+    func callAsFunction(_ x: MLXArray, onRoute: ((MLXArray) -> Void)? = nil, fast: Bool = false) -> MLXArray {
         let (indices, weights) = route(x)
         onRoute?(indices)
         let (b, length, d) = (x.dim(0), x.dim(1), x.dim(2))
+        if fast, b * length == 1 {
+            return fused(x: x, expertIDs: indices, weights: weights).reshaped([b, length, d])
+        }
         let routes = indices.dim(-1)
         let out: MLXArray
         if indices.size >= 64 {
