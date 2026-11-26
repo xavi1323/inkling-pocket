@@ -14,10 +14,11 @@ final class SparseMoE {
     /// Single-token kernels over the same weights (fast path).
     lazy var fused = FusedMoEDecode(gate: gateProj.linear, up: upProj.linear, down: downProj.linear, gateCap: gateCap, upCap: upCap)
 
-    init(_ config: InklingTextConfig, path: String, loader: WeightLoader) throws {
+    init(_ config: InklingTextConfig, layer: Int, path: String, loader: WeightLoader) throws {
         gateWeight = try loader.tensor(path + ".gate_weight")
         scoreBias = try loader.tensor(path + ".e_score_correction_bias")
-        if let slots = loader.expertSlots, let mapped = loader.source as? MappedSafetensors {
+        if let plan = loader.expertSlots, layer < plan.count, let mapped = loader.source as? MappedSafetensors {
+            let slots = plan[layer]
             let cache = try ExpertCache(path: path, weights: mapped, quant: loader.quant, prefix: loader.prefix,
                                         slots: min(max(slots, config.expertsPerToken), config.numExperts))
             self.cache = cache

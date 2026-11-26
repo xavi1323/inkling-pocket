@@ -7,10 +7,10 @@ public struct MemoryBudget {
     /// Used where `os_proc_available_memory` does not exist (macOS tests, Linux).
     public static let fallback: Int64 = 4_000_000_000
     /// Never more than this share of physical RAM: with the per-app limit lifted (iRAM+), iOS reports most of RAM
-    /// as available, but the system and its other processes need the rest (11.6 GB iPad → 6.4 GB).
-    public static let physicalShare = 0.55
+    /// as available, but the system and its other processes need the rest (11.6 GB iPad → 7 GB).
+    public static let physicalShare = 0.6
 
-    /// `min(os_proc_available_memory() - 1.5 GB, 55% of RAM)`, or the Settings override (GB) when set.
+    /// `min(os_proc_available_memory() - 1.5 GB, 60% of RAM)`, or the Settings override (GB) when set.
     public static func current(overrideGB: Double?) -> Int64 {
         budget(available: MemoryInfo.availableBytes(), physical: Int64(ProcessInfo.processInfo.physicalMemory), overrideGB: overrideGB)
     }

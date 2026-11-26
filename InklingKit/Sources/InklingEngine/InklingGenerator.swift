@@ -17,12 +17,12 @@ public actor InklingGenerator: LanguageModel {
     let generator: TokenGenerator
     /// Bytes of memory-mapped weight shards (0 for test models).
     public let mappedWeightBytes: Int64
-    /// Expert slots per MoE layer (nil when experts are not streamed, e.g. test models).
-    public let expertSlots: Int?
+    /// Expert slots for each MoE layer (nil when experts are not streamed, e.g. test models).
+    public let expertSlots: [Int]?
     /// Mapped bytes that are not expert weights.
     let nonExpertBytes: Int64
     /// Working memory kept free for the KV cache, activations and Metal scratch on top of `MemoryBudget`'s margin.
-    static let workingReserve: Int64 = 600_000_000
+    static let workingReserve: Int64 = 800_000_000
     static let mlxCacheLimit = 256 << 20
 
     /// Gives memory freed by a dropped engine back to iOS (call after releasing the old engine, before loading).
@@ -37,31 +37,38 @@ public actor InklingGenerator: LanguageModel {
         let weights = try MappedSafetensors(manifest: manifest)
         let data = try Data(contentsOf: manifest.folder.appending(path: "config.json"))
         let config = try InklingModelConfig.decode(data)
-        let perSlot = Self.bytesPerSlot(weights: weights, config: config.text)
-        let nonExpert = weights.mappedBytes - perSlot * Int64(config.text.numExperts)
-        let slots = Self.slots(budget: MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert - Self.workingReserve,
-                               perSlot: perSlot, config: config.text)
-        let model = try Inkling2LanguageModel.load(config: config, weights: weights, expertSlots: slots)
+        let text = config.text
+        let perLayer = (0..<text.numHiddenLayers).map {
+            ExpertCache.bytesPerExpert(path: "model.layers.\($0).mlp", weights: weights, prefix: "language_model.", experts: text.numExperts)
+        }
+        let nonExpert = weights.mappedBytes - perLayer.reduce(0, +) * Int64(text.numExperts)
+        let visits = (0..<text.numHiddenLayers).map { layer in text.layerVisits.filter { $0 == layer }.count }
+        let slots = Self.slotPlan(budget: MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert - Self.workingReserve,
+                                  perLayer: perLayer, visits: visits, experts: text.numExperts, topK: text.expertsPerToken)
+        let model = try Inkling2LanguageModel.load(config: config, weights: weights, slotPlan: slots)
         let tokenizer = try InklingTokenizer(modelFolder: modelFolder)
         self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes, expertSlots: slots,
                   nonExpertBytes: nonExpert)
     }
 
-    /// Bytes of one expert in every MoE layer (one slot everywhere).
-    static func bytesPerSlot(weights: MappedSafetensors, config: InklingTextConfig) -> Int64 {
-        (0..<config.numHiddenLayers).map {
-            ExpertCache.bytesPerExpert(path: "model.layers.\($0).mlp", weights: weights, prefix: "language_model.", experts: config.numExperts)
-        }.reduce(0, +)
-    }
-
-    /// Slots per layer that fit `budget`: at least one token's experts, at most all of them.
-    static func slots(budget: Int64, perSlot: Int64, config: InklingTextConfig) -> Int {
-        guard perSlot > 0 else { return config.numExperts }
-        return Int(min(max(budget / perSlot, Int64(config.expertsPerToken)), Int64(config.numExperts)))
+    /// Slots per layer within `budget` bytes, in proportion to how often each layer is visited per token (the loop
+    /// core runs three times), each between one token's experts (`topK`) and all of them.
+    static func slotPlan(budget: Int64, perLayer: [Int64], visits: [Int], experts: Int, topK: Int) -> [Int] {
+        func plan(_ c: Double) -> [Int] {
+            zip(perLayer, visits).map { b, v in b == 0 ? experts : min(experts, max(topK, Int(c * Double(max(v, 1))))) }
+        }
+        func cost(_ p: [Int]) -> Int64 { zip(p, perLayer).map { Int64($0) * $1 }.reduce(0, +) }
+        if cost(plan(Double(experts))) <= budget { return plan(Double(experts)) }
+        var lo = 0.0, hi = Double(experts)
+        for _ in 0..<60 {
+            let mid = (lo + hi) / 2
+            if cost(plan(mid)) <= budget { lo = mid } else { hi = mid }
+        }
+        return plan(lo)
     }
 
     init(model: CausalLM, tokenizer: InklingTokenizer, path: EnginePath = .reference, mappedBytes: Int64 = 0,
-         expertSlots: Int? = nil, nonExpertBytes: Int64 = 0) {
+         expertSlots: [Int]? = nil, nonExpertBytes: Int64 = 0) {
         self.nonExpertBytes = nonExpertBytes
         self.tokenizer = tokenizer
         self.path = path
@@ -74,7 +81,11 @@ public actor InklingGenerator: LanguageModel {
         } else {
             generator = TokenGenerator(model: model, eos: [tokenizer.eosID])
         }
+        // A prompt chunk needs nearly every expert, so streaming reads the experts once per chunk: fewer, bigger chunks.
+        if expertSlots != nil { generator.prefillChunk = Self.streamingPrefillChunk }
     }
+
+    static let streamingPrefillChunk = 512  // the attention mask for a chunk grows with chunk × context; 512 keeps it ~0.5 GB
 
     /// Share of expert lookups already in a slot (nil when not streaming).
     var expertHitRate: Double? {

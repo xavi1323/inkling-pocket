@@ -66,26 +66,46 @@ import InklingCore
         #expect(cache.bytes == Int64(cache.slots) * ExpertCache.bytesPerExpert(path: path, weights: weights, prefix: "language_model.", experts: config.text.numExperts))
     }
 
+    /// An expert used often stays even when newer experts were each needed once.
+    @Test func frequentExpertSurvivesOneOffs() throws {
+        let weights = try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")])
+        let cache = try ExpertCache(path: "model.layers.0.mlp", weights: weights, quant: try Tiny.config().quantization,
+                                    prefix: "language_model.", slots: 3)
+        for _ in 0..<5 { _ = cache.ensure([0]) }
+        _ = cache.ensure([1])
+        _ = cache.ensure([2])
+        _ = cache.ensure([3])
+        #expect(cache.slot(of: 0) != nil)
+        #expect(cache.slot(of: 1) == nil)
+    }
+
+    /// Layers the loop visits three times get three times the slots, within the byte budget.
+    @Test func slotPlanFavoursRepeatedLayers() {
+        let perLayer: [Int64] = Array(repeating: 3_200_000, count: 6)
+        let visits = [1, 3, 3, 3, 1, 1]
+        let plan = InklingGenerator.slotPlan(budget: 400_000_000, perLayer: perLayer, visits: visits, experts: 128, topK: 8)
+        #expect(plan[1] == plan[2] && plan[1] >= 3 * plan[0] - 3)
+        #expect(zip(plan, perLayer).map { Int64($0) * $1 }.reduce(0, +) <= 400_000_000)
+        #expect(InklingGenerator.slotPlan(budget: 0, perLayer: perLayer, visits: visits, experts: 128, topK: 8).allSatisfy { $0 == 8 })
+        #expect(InklingGenerator.slotPlan(budget: .max, perLayer: perLayer, visits: visits, experts: 128, topK: 8).allSatisfy { $0 == 128 })
+        // Slots a repeated layer cannot use (all experts already) go to the others.
+        let big = InklingGenerator.slotPlan(budget: 3_200_000 * 600, perLayer: perLayer, visits: visits, experts: 128, topK: 8)
+        #expect(big[1] == 128 && big[0] == 72)
+    }
+
     @Test func streamedModelHoldsOnlySlots() throws {
         let model = try Self.streamed(slots: 3)
         let slotsPerLayer = model.expertCaches.map { $0.down.weight.dim(0) }
         #expect(slotsPerLayer.allSatisfy { $0 == 3 })
     }
 
-    @Test func slotCountFitsTheBudget() throws {
-        let config = try Tiny.config().text
-        let perSlot: Int64 = 76_000_000  // real model: one expert in every layer
-        #expect(InklingGenerator.slots(budget: 3_800_000_000, perSlot: perSlot, config: config) == min(50, config.numExperts))
-        #expect(InklingGenerator.slots(budget: -1, perSlot: perSlot, config: config) == config.expertsPerToken)
-        #expect(InklingGenerator.slots(budget: .max, perSlot: perSlot, config: config) == config.numExperts)
-    }
 }
 
 /// iRAM+ lifts the per-app limit, so `os_proc_available_memory` can report most of RAM; the iPad then runs out
 /// system-wide (jetsam log: app at 9.9 GB of 11.6 GB). The budget is capped by physical memory.
 @Test func budgetIsCappedByPhysicalMemory() {
     let ipad: Int64 = 12_434_000_000  // 11.58 GB
-    #expect(MemoryBudget.budget(available: 10_500_000_000, physical: ipad, overrideGB: nil) == Int64(Double(ipad) * MemoryBudget.physicalShare))
+    #expect(MemoryBudget.budget(available: 10_500_000_000, physical: ipad, overrideGB: nil) == Int64(Double(ipad) * 0.6))
     #expect(MemoryBudget.budget(available: 5_000_000_000, physical: ipad, overrideGB: nil) == 5_000_000_000 - MemoryBudget.safetyMargin)
     #expect(MemoryBudget.budget(available: nil, physical: ipad, overrideGB: nil) == MemoryBudget.fallback)
     #expect(MemoryBudget.budget(available: 10_500_000_000, physical: ipad, overrideGB: 3) == 3_000_000_000)

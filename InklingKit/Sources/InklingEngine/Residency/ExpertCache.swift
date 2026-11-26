@@ -2,8 +2,9 @@ import Foundation
 import MLX
 import InklingCore
 
-/// One MoE layer's experts in a fixed number of slots of ordinary memory, copied in from the memory-mapped weights
-/// when a token needs them (least recently used slot is reused).
+/// One MoE layer's experts in a fixed number of slots of ordinary memory, read in from the shard files when a token
+/// needs them. The slot reused is the one whose expert is used least often (counts halve every `agingPeriod` calls),
+/// oldest first among equals.
 ///
 /// Why: MLX puts every buffer it wraps into a Metal residency set, which pins (wires) it. Handing MLX the mapped
 /// 9.7 GB of experts pinned nearly all of them and iOS killed the app. The GPU only ever sees these slots.
@@ -18,7 +19,11 @@ final class ExpertCache {
         let source: UnsafeRawPointer
         let stride: Int
         let destination: UnsafeMutableRawPointer
+        /// Shard file and the tensor's offset in it: one `pread` per expert instead of a page fault per 16 KB.
+        let fd: Int32
+        let offset: Int64
     }
+    static let agingPeriod: UInt64 = 2048
 
     let slots: Int
     let experts: Int
@@ -31,6 +36,8 @@ final class ExpertCache {
     private var slotOf: [Int: Int] = [:]
     private var expertIn: [Int?]
     private var lastUse: [UInt64]
+    private var uses: [Int]
+    private var files: [URL: Int32] = [:]
     private var clock: UInt64 = 0
     private(set) var hits = 0
     private(set) var misses = 0
@@ -46,6 +53,7 @@ final class ExpertCache {
         var parts: [Part] = []
         var bytes: Int64 = 0
         var experts = 0
+        var files: [URL: Int32] = [:]
         for projection in Self.projections {
             let module = path + ".switch_mlp." + projection
             var arrays: [MLXArray?] = []
@@ -62,7 +70,16 @@ final class ExpertCache {
                     throw ModelLoadError.unsupported("\(name): expert slots are not contiguous")
                 }
                 let destination = data.data.withUnsafeBytes { UnsafeMutableRawPointer(mutating: $0.baseAddress!) }
-                parts.append(Part(source: try weights.pointer(name), stride: stride, destination: destination))
+                let (url, offset) = try weights.location(name)
+                if files[url] == nil {
+                    let fd = open(url.path, O_RDONLY)
+                    #if canImport(Darwin)
+                    if fd >= 0 { _ = fcntl(fd, F_RDAHEAD, 0) }  // reads are whole experts; no read-ahead into the next
+                    #endif
+                    files[url] = fd
+                }
+                parts.append(Part(source: try weights.pointer(name), stride: stride, destination: destination,
+                                  fd: files[url]!, offset: offset))
                 bytes += Int64(slots * stride)
                 arrays.append(array)
             }
@@ -81,8 +98,30 @@ final class ExpertCache {
         (gate, up, down) = (built[0], built[1], built[2])
         self.parts = parts
         self.bytes = bytes
+        self.files = files
         expertIn = Array(repeating: nil, count: slots)
         lastUse = Array(repeating: 0, count: slots)
+        uses = Array(repeating: 0, count: experts)
+    }
+
+    deinit {
+        for fd in files.values where fd >= 0 { close(fd) }
+    }
+
+    /// Reads one expert's bytes of `part` into `slot` (falls back to copying from the mapping).
+    private static func load(_ part: Part, expert: Int, slot: Int) {
+        let destination = part.destination + slot * part.stride
+        var done = 0
+        if part.fd >= 0 {
+            while done < part.stride {
+                let n = pread(part.fd, destination + done, part.stride - done, off_t(part.offset) + off_t(expert * part.stride + done))
+                if n <= 0 { break }
+                done += n
+            }
+        }
+        if done < part.stride {
+            memcpy(destination + done, part.source + expert * part.stride + done, part.stride - done)
+        }
     }
 
     static func contiguousStrides(_ shape: [Int]) -> [Int] {
@@ -97,6 +136,8 @@ final class ExpertCache {
     func ensure(_ experts: [Int]) -> [Int: Int32] {
         precondition(Set(experts).count <= slots, "more experts than slots")
         clock += 1
+        if clock % Self.agingPeriod == 0 { uses = uses.map { $0 / 2 } }
+        for e in Set(experts) { uses[e] += 1 }
         var map: [Int: Int32] = [:]
         var missing: [Int] = []
         for e in experts where map[e] == nil {
@@ -109,7 +150,10 @@ final class ExpertCache {
             }
         }
         guard !missing.isEmpty else { return map }
-        let free = (0..<slots).filter { lastUse[$0] != clock }.sorted { lastUse[$0] < lastUse[$1] }
+        let free = (0..<slots).filter { lastUse[$0] != clock }.sorted { a, b in
+            let ua = expertIn[a].map { uses[$0] } ?? -1, ub = expertIn[b].map { uses[$0] } ?? -1
+            return ua != ub ? ua < ub : lastUse[a] < lastUse[b]
+        }
         var jobs: [(expert: Int, slot: Int)] = []
         for (e, s) in zip(missing, free) {
             if let old = expertIn[s] { slotOf[old] = nil }
@@ -123,7 +167,7 @@ final class ExpertCache {
         let parts = self.parts, copies = jobs
         DispatchQueue.concurrentPerform(iterations: jobs.count * parts.count) { i in
             let job = copies[i / parts.count], part = parts[i % parts.count]
-            memcpy(part.destination + job.slot * part.stride, part.source + job.expert * part.stride, part.stride)
+            Self.load(part, expert: job.expert, slot: job.slot)
         }
         return map
     }

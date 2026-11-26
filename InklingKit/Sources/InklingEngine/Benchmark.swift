@@ -23,7 +23,7 @@ public struct BenchmarkReport: Sendable, Equatable {
     public var mappedWeightBytes: Int64 = 0
     public var expertHitRate: Double?
     /// Expert slots per layer (streaming), nil when the whole expert tensors are used.
-    public var expertSlots: Int?
+    public var expertSlots: [Int]?
     public var thermalState = "unknown"
     public var routing = ""
     public var passOverlap = ""
@@ -42,7 +42,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Peak footprint: \(gb(peakFootprintBytes))",
             "Mapped weights: \(gb(mappedWeightBytes))",
             "Expert hit rate: \(expertHitRate.map { String(format: "%.1f%%", $0 * 100) } ?? "n/a (not streaming)")",
-            "Expert slots per layer: \(expertSlots.map(String.init) ?? "all (not streaming)")",
+            "Expert slots per layer: \(expertSlots.map { "\($0.min() ?? 0)–\($0.max() ?? 0) (\($0.reduce(0, +)) total)" } ?? "all (not streaming)")",
             "Thermal: \(thermalState)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
             "Routing:",

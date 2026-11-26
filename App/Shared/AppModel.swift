@@ -163,10 +163,12 @@ final class AppModel {
 
 enum SystemPrompt {
     static func build(now: Date, memory: String) -> String {
-        let date = now.formatted(date: .complete, time: .shortened)
+        // Date only: the prompt must stay identical between turns so the engine can reuse the work done on it
+        // (with the time in it, every reply re-read the whole conversation).
+        let date = now.formatted(date: .complete, time: .omitted)
         var parts = [
             """
-            You are Inkling, a helpful assistant that runs entirely on the user's iPad. It is \(date).
+            You are Inkling, a helpful assistant that runs entirely on the user's iPad. Today is \(date).
             Use tools when they help: web_search for current or unknown facts, open_url to read a page, \
             memory_save for lasting facts about the user (preferences, names, plans), memory_search and chat_search to recall. \
             When you use web results, cite them with their ⟨n⟩ numbers.

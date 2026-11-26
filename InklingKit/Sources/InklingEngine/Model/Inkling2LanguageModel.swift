@@ -28,15 +28,20 @@ public final class Inkling2LanguageModel: CausalLM {
     }
 
     /// `expertSlots`: stream experts through that many slots per layer instead of handing MLX the mapped tensors.
-    public static func load(config: InklingModelConfig, weights: WeightSource, expertSlots: Int? = nil) throws -> Inkling2LanguageModel {
+    public static func load(config: InklingModelConfig, weights: WeightSource, expertSlots: Int) throws -> Inkling2LanguageModel {
+        try load(config: config, weights: weights, slotPlan: Array(repeating: expertSlots, count: config.text.numHiddenLayers))
+    }
+
+    /// `slotPlan`: expert slots for each layer (nil = hand MLX the whole expert tensors).
+    public static func load(config: InklingModelConfig, weights: WeightSource, slotPlan: [Int]? = nil) throws -> Inkling2LanguageModel {
         var loader = WeightLoader(source: weights, quant: config.quantization)
-        loader.expertSlots = expertSlots
+        loader.expertSlots = slotPlan
         return try Inkling2LanguageModel(config: config.text, loader: loader)
     }
 
-    public static func load(manifest: ModelManifest, weights: WeightSource, expertSlots: Int? = nil) throws -> Inkling2LanguageModel {
+    public static func load(manifest: ModelManifest, weights: WeightSource) throws -> Inkling2LanguageModel {
         let data = try Data(contentsOf: manifest.folder.appending(path: "config.json"))
-        return try load(config: InklingModelConfig.decode(data), weights: weights, expertSlots: expertSlots)
+        return try load(config: InklingModelConfig.decode(data), weights: weights)
     }
 
     /// One per MoE layer when experts are streamed.

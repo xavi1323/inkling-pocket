@@ -14,7 +14,7 @@ public enum MappedSafetensorsError: Error, Equatable {
 /// Memory-maps every shard read-only. On repacked (16 KB-aligned) folders, `array(_:)` hands MLX
 /// pointers into the mapping, which Metal wraps without copying; otherwise MLX copies the tensor.
 public final class MappedSafetensors: @unchecked Sendable {
-    private struct Mapping { let base: UnsafeMutableRawPointer; let size: Int }
+    private struct Mapping { let base: UnsafeMutableRawPointer; let size: Int; let url: URL }
     private var mappings: [Mapping] = []
     private var index: [String: (mapping: Int, entry: SafetensorsEntry)] = [:]
     /// Bytes mapped (sum of shard sizes).
@@ -38,7 +38,7 @@ public final class MappedSafetensors: @unchecked Sendable {
             guard let ptr, ptr != UnsafeMutableRawPointer(bitPattern: -1) else { throw MappedSafetensorsError.cannotMap(url.lastPathComponent) }
             let header = try SafetensorsHeader.read(url)
             if header.metadata[WeightRepacker.metadataKey] != "\(WeightRepacker.alignment)" { isAligned = false }
-            mappings.append(Mapping(base: ptr, size: size))
+            mappings.append(Mapping(base: ptr, size: size, url: url))
             for e in header.entries { index[e.name] = (mappings.count - 1, e) }
             mappedBytes += Int64(size)
         }
@@ -56,6 +56,12 @@ public final class MappedSafetensors: @unchecked Sendable {
     public func pointer(_ name: String) throws -> UnsafeRawPointer {
         guard let (m, e) = index[name] else { throw MappedSafetensorsError.unknownTensor(name) }
         return UnsafeRawPointer(mappings[m].base + Int(e.start))
+    }
+
+    /// The shard file holding a tensor and the tensor's byte offset in it (for direct reads).
+    public func location(_ name: String) throws -> (url: URL, offset: Int64) {
+        guard let (m, e) = index[name] else { throw MappedSafetensorsError.unknownTensor(name) }
+        return (mappings[m].url, e.start)
     }
 
     /// Whether `array(name)` can avoid copying (page-aligned start and whole pages inside the file).

@@ -27,7 +27,7 @@ final class DecoderLayer {
             : AttentionResidual(query: try loader.tensor(path + ".attention_input.query"), normalizeValues: normalize)
         mlpInput = AttentionResidual(query: try loader.tensor(path + ".mlp_input.query"), normalizeValues: normalize)
         attention = try Attention(config, layer: layer, path: path + ".self_attn", loader: loader)
-        moe = try SparseMoE(config, path: path + ".mlp", loader: loader)
+        moe = try SparseMoE(config, layer: layer, path: path + ".mlp", loader: loader)
         let norms = isSliding ? ["input_layernorm"] : ["q_input_layernorm", "k_input_layernorm", "v_input_layernorm"]
         inputNorms = try norms.map { try loader.tensor("\(path).\($0).weight") }
         postAttentionNorm = try loader.tensor(path + ".post_attention_layernorm.weight")

@@ -69,8 +69,8 @@ struct WeightLoader {
     let source: WeightSource
     let quant: QuantizationMap
     var prefix = "language_model."
-    /// When set (and the source is memory-mapped), MoE experts are streamed through this many slots per layer.
-    var expertSlots: Int? = nil
+    /// When set (and the source is memory-mapped), MoE experts are streamed through this many slots (per layer).
+    var expertSlots: [Int]? = nil
 
     func has(_ path: String) -> Bool { source.contains(prefix + path) }
 
