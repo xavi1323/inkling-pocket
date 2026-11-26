@@ -284,19 +284,33 @@ public final class TokenGenerator {
         return produced
     }
 
-    /// The tokens after the most recent earlier occurrence of the context's last 3 tokens (up to `max`), or none.
+    /// The tokens after an earlier occurrence of the context's last tokens (up to `max`), or none. Tries the last
+    /// 6, 5, 4, then 3 tokens (a longer match is more likely right); among matches of one length, the one with the
+    /// longest continuation wins, ties going to the most recent.
     static func lookupDraft(_ context: [Int32], max: Int) -> [Int32] {
-        let n = 3
-        guard max > 0, context.count > n else { return [] }
-        let tail = context.suffix(n)
-        var start = context.count - n - 1
-        while start >= 0 {
-            if context[start..<(start + n)].elementsEqual(tail) {
-                return Array(context[(start + n)..<min(start + n + max, context.count)])
+        guard max > 0 else { return [] }
+        let count = context.count
+        return context.withUnsafeBufferPointer { c in
+            for n in stride(from: 6, through: 3, by: -1) where count > n {
+                var best = -1, bestLength = 0
+                var start = count - n - 1
+                while start >= 0 {
+                    var k = 0
+                    while k < n, c[start + k] == c[count - n + k] { k += 1 }
+                    if k == n {
+                        let length = Swift.min(max, count - start - n)
+                        if length > bestLength {
+                            best = start
+                            bestLength = length
+                            if length == max { break }
+                        }
+                    }
+                    start -= 1
+                }
+                if best >= 0 { return Array(c[(best + n)..<(best + n + bestLength)]) }
             }
-            start -= 1
+            return []
         }
-        return []
     }
 
     /// The state after `tokens` (prompt + what was fed since) is kept for the next prompt: the end of the reply.
