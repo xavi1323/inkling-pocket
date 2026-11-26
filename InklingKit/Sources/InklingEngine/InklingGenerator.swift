@@ -166,7 +166,10 @@ public actor InklingGenerator: LanguageModel {
             generator = TokenGenerator(model: model, eos: [tokenizer.eosID])
         }
         // A prompt chunk needs nearly every expert, so streaming reads the experts once per chunk: fewer, bigger chunks.
-        if expertSlots != nil { generator.prefillChunk = Self.streamingPrefillChunk }
+        if expertSlots != nil {
+            generator.prefillChunk = Self.streamingPrefillChunk
+            generator.prefillChunkChoices = [1024, 2048, 4096]
+        }
         // Keep the cache right after each end of message (a thought's end): the next agent step resends it.
         if let end = tokenizer.specialTokenID(PromptFormatter.Token.endMessage) { generator.boundaryTokens = [end] }
     }

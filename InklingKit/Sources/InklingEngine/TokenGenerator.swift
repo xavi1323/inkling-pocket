@@ -86,6 +86,19 @@ public final class TokenGenerator {
     public let model: CausalLM
     public var eos: Set<Int32>
     public var prefillChunk = 256
+    /// Chunk sizes to choose between for long prompts, by measured speed (empty: always `prefillChunk`).
+    public var prefillChunkChoices: [Int] = []
+    /// Seconds per prefilled token for each tried chunk size (recency-weighted).
+    private var prefillChunkCost: [Int: Double] = [:]
+    /// How many prompts used each chunk size.
+    var prefillChunkTries: [Int: Int] = [:]
+    /// Long prompts seen so far (every 8th tries a size other than the fastest).
+    private var longPrompts = 0
+    /// The fastest measured chunk size, or `prefillChunk` before any is measured.
+    public var chosenPrefillChunk: Int {
+        prefillChunkChoices.filter { prefillChunkCost[$0] != nil }.min { prefillChunkCost[$0]! < prefillChunkCost[$1]! }
+            ?? prefillChunk
+    }
     public var contextLimit = 16_384
     public private(set) var stats = GenerationStats()
     /// Called after the prompt and after every generated token, once its logits are evaluated. The argument is how
@@ -161,9 +174,12 @@ public final class TokenGenerator {
             prefixMark = nil
         }
         let keepPrefix = stablePrefix > from && stablePrefix < prompt.count
+        let tuned = pickPrefillChunk(remaining: prompt.count - from)
+        let chunk = tuned ?? prefillChunk
+        let loopStart = Date()
         var i = from
         while i < prompt.count {
-            var end = min(i + prefillChunk, prompt.count)
+            var end = min(i + chunk, prompt.count)
             if keepPrefix, i < stablePrefix { end = min(end, stablePrefix) }
             logits = model.lastLogits(MLXArray(Array(prompt[i..<end])).reshaped([1, -1]), cache: cache)
             eval(logits!)
@@ -182,12 +198,33 @@ public final class TokenGenerator {
         let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
         mark = (prompt, snapshots.count == cache.count ? snapshots : [], logits!)
         if snapshots.count != cache.count { mark = nil }
+        if let tuned { recordPrefillChunk(tuned, seconds: Date().timeIntervalSince(loopStart), tokens: prompt.count - from) }
         afterStep?(0)
         stats.promptTokens = prompt.count
         stats.prefilledTokens = prompt.count - from
         let seconds = Date().timeIntervalSince(start)
         stats.prefillTokensPerSecond = seconds > 0 ? Double(stats.prefilledTokens) / seconds : 0
         return logits!
+    }
+
+    /// The chunk size for a prompt with `remaining` tokens to feed, or nil for `prefillChunk` (no choices, or short).
+    /// Each choice is tried twice, then the fastest is used, with a different one every 8th long prompt.
+    private func pickPrefillChunk(remaining: Int) -> Int? {
+        guard let smallest = prefillChunkChoices.min(), remaining > smallest else { return nil }
+        longPrompts += 1
+        if let untried = prefillChunkChoices.first(where: { prefillChunkTries[$0, default: 0] < 2 }) { return untried }
+        let fastest = chosenPrefillChunk
+        let others = prefillChunkChoices.filter { $0 != fastest }
+        if longPrompts % 8 == 0, !others.isEmpty { return others[(longPrompts / 8) % others.count] }
+        return fastest
+    }
+
+    /// Folds one finished prefill's speed into its chunk size's average (newer counts 30%).
+    private func recordPrefillChunk(_ chunk: Int, seconds: Double, tokens: Int) {
+        guard tokens > 0 else { return }
+        let cost = seconds / Double(tokens)
+        prefillChunkCost[chunk] = prefillChunkCost[chunk].map { $0 * 0.7 + cost * 0.3 } ?? cost
+        prefillChunkTries[chunk, default: 0] += 1
     }
 
     /// Tokens of the kept stable prefix, if any.
@@ -284,19 +321,33 @@ public final class TokenGenerator {
         return produced
     }
 
-    /// The tokens after the most recent earlier occurrence of the context's last 3 tokens (up to `max`), or none.
+    /// The tokens after an earlier occurrence of the context's last tokens (up to `max`), or none. Tries the last
+    /// 6, 5, 4, then 3 tokens (a longer match is more likely right); among matches of one length, the one with the
+    /// longest continuation wins, ties going to the most recent.
     static func lookupDraft(_ context: [Int32], max: Int) -> [Int32] {
-        let n = 3
-        guard max > 0, context.count > n else { return [] }
-        let tail = context.suffix(n)
-        var start = context.count - n - 1
-        while start >= 0 {
-            if context[start..<(start + n)].elementsEqual(tail) {
-                return Array(context[(start + n)..<min(start + n + max, context.count)])
+        guard max > 0 else { return [] }
+        let count = context.count
+        return context.withUnsafeBufferPointer { c in
+            for n in stride(from: 6, through: 3, by: -1) where count > n {
+                var best = -1, bestLength = 0
+                var start = count - n - 1
+                while start >= 0 {
+                    var k = 0
+                    while k < n, c[start + k] == c[count - n + k] { k += 1 }
+                    if k == n {
+                        let length = Swift.min(max, count - start - n)
+                        if length > bestLength {
+                            best = start
+                            bestLength = length
+                            if length == max { break }
+                        }
+                    }
+                    start -= 1
+                }
+                if best >= 0 { return Array(c[(best + n)..<(best + n + bestLength)]) }
             }
-            start -= 1
+            return []
         }
-        return []
     }
 
     /// The state after `tokens` (prompt + what was fed since) is kept for the next prompt: the end of the reply.
