@@ -281,6 +281,29 @@ final class ExpertCache: @unchecked Sendable {
         }
     }
 
+    // MARK: Heat (kept between launches)
+
+    /// Use counts per expert (what eviction goes by), saved so the next launch starts with the right experts.
+    func heat() -> [Int] { queue.sync { uses } }
+
+    /// Launch: restores saved use counts and reads the most-used experts into free slots in the background (below
+    /// the reads a step waits on). Only call before any GPU work reads this layer's slots.
+    func warm(uses saved: [Int]) {
+        guard saved.count == experts else { return }
+        let top = Array((0..<experts).filter { saved[$0] > 0 }.sorted { saved[$0] > saved[$1] }.prefix(slots))
+        let delay = readDelay, group = DispatchGroup()
+        group.enter()
+        queue.async { [self] in
+            uses = saved
+            guard !top.isEmpty, let r = reserve(top, counting: false, group: group), !r.jobs.isEmpty else { group.leave(); return }
+            DispatchQueue.global(qos: .utility).async { [self] in
+                read(r.jobs, counting: false, delay: delay)
+                queue.sync { finish(r.jobs, group: group) }
+                group.leave()
+            }
+        }
+    }
+
     // MARK: Turbo (no waits inside a token)
 
     /// Turbo: each expert's slot (`safe`, a ready slot, when it has none) and 1 when it is ready (in a slot and not

@@ -7,6 +7,7 @@ final class ScriptedModel: LanguageModel, @unchecked Sendable {
     private let lock = NSLock()
     private var scripts: [[ModelEvent]]
     private(set) var receivedMessages: [[ChatMessage]] = []
+    private(set) var receivedParameters: [GenerateParameters] = []
 
     init(_ scripts: [[ModelEvent]]) { self.scripts = scripts }
 
@@ -14,6 +15,7 @@ final class ScriptedModel: LanguageModel, @unchecked Sendable {
                   parameters: GenerateParameters) -> AsyncThrowingStream<ModelEvent, Error> {
         lock.lock()
         receivedMessages.append(messages)
+        receivedParameters.append(parameters)
         let events = scripts.isEmpty ? [.answer("(no script)"), .end] : scripts.removeFirst()
         lock.unlock()
         return AsyncThrowingStream { c in

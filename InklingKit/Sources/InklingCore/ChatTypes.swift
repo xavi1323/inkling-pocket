@@ -82,4 +82,16 @@ public enum ReasoningEffort: String, CaseIterable, Codable, Sendable {
         case .xhigh, .max: 0.99
         }
     }
+
+    /// Most thinking tokens per reply before the thought is closed and the model answers (nil: no cap). Thinking is
+    /// most of the wait for an answer; low effort keeps it short.
+    public var thinkingTokenCap: Int? {
+        switch self {
+        case .none, .minimal: 128
+        case .low: 384
+        case .medium: 1024
+        case .high: 2048
+        case .xhigh, .max: nil
+        }
+    }
 }

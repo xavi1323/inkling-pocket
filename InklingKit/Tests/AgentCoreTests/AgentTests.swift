@@ -73,3 +73,15 @@ func finishedMessages(_ events: [AgentEvent]) -> [ChatMessage] {
     #expect(model.countTokens(toolMsg.content) <= 2000)
     #expect(toolMsg.content.hasSuffix("[trimmed]"))
 }
+
+/// Each step's thinking is capped by the effort (low: a few hundred tokens), unless a cap was set explicitly.
+@Test func thinkingCapFollowsEffort() async throws {
+    let model = ScriptedModel([[.answer("a"), .end]])
+    var s = AgentSettings()
+    s.effort = .low
+    _ = try await collect(await Agent(model: model, tools: ToolRegistry([EchoTool()]), settings: s).run(history: userHi, systemPrompt: "sys"))
+    #expect(model.receivedParameters[0].maxThinkingTokens == ReasoningEffort.low.thinkingTokenCap)
+    #expect(ReasoningEffort.low.thinkingTokenCap == 384)
+    #expect(ReasoningEffort.max.thinkingTokenCap == nil)
+    #expect(AgentSettings().toolResultTokenBudget == 1000)
+}

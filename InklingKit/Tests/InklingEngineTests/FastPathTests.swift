@@ -336,3 +336,36 @@ extension FastPathTests {
         #expect(TokenGenerator.lookupDraft([1, 2, 3, 4], max: 4) == [])
     }
 }
+
+/// A forced token (the thinking cap closing a thought) replaces the sampled one, the same way with and without
+/// speculative decoding.
+extension FastPathTests {
+    @Test func forcedTokenReplacesSampledOneWithAndWithoutDrafts() throws {
+        func run(draft: Bool) throws -> [Int32] {
+            let model = try Tiny.model()
+            // The reference path: on the CPU its steps match the multi-token checks (see `exact`).
+            let gen = TokenGenerator(model: model, eos: [])
+            if draft { gen.draft = WrongDraft(model) }
+            var count = 0
+            gen.forcedToken = { count == 3 ? 7 : nil }
+            return gen.generate(prompt: specPrompt, sampler: Sampler(greedy()), maxTokens: 12, shouldStop: { false },
+                                onToken: { _ in count += 1 })
+        }
+        let plain = try run(draft: false), drafted = try run(draft: true)
+        #expect(plain[3] == 7)
+        #expect(drafted == plain)
+    }
+
+    @Test func thinkingBudgetClosesALongThought() {
+        let b = ThinkingBudget(cap: 2, open: 10, close: 11)
+        #expect(b.forced == nil)
+        b.observe(10); b.observe(1)
+        #expect(b.forced == nil)
+        b.observe(2)
+        #expect(b.forced == 11)
+        b.observe(11)
+        #expect(b.forced == nil)
+        b.observe(5); b.observe(6); b.observe(7)
+        #expect(b.forced == nil)  // not thinking
+    }
+}

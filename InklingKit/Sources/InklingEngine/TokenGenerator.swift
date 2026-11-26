@@ -39,6 +39,27 @@ public enum GenerationError: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// Closes a thought that ran past `cap` tokens: after `open` (the thinking marker) counts tokens until `close`
+/// (end of message), and once `cap` is reached asks for `close` to be forced.
+final class ThinkingBudget {
+    let cap: Int
+    let open, close: Int32
+    private var thinking = false
+    private var count = 0
+
+    init(cap: Int, open: Int32, close: Int32) {
+        self.cap = cap
+        self.open = open
+        self.close = close
+    }
+
+    func observe(_ token: Int32) {
+        if token == open { thinking = true; count = 0 } else if token == close { thinking = false } else if thinking { count += 1 }
+    }
+
+    var forced: Int32? { thinking && count >= cap ? close : nil }
+}
+
 /// Token-level generation: chunked prefill, prompt-prefix reuse across turns, cancellation between tokens.
 /// Not thread-safe — owned by one actor.
 public final class TokenGenerator {
@@ -56,6 +77,9 @@ public final class TokenGenerator {
     /// checks them all in one multi-token pass and keeps only the tokens it would have sampled itself. The output is
     /// `model`'s (exact), whatever the draft guesses. Text repeated from the context is guessed by lookup instead.
     public var draft: CausalLM?
+    /// Asked before each token is picked; a non-nil token is used instead of sampling (the thinking cap closing a
+    /// thought). It sees the tokens handed out so far through `onToken`.
+    public var forcedToken: (() -> Int32?)?
     public var maxDraft = 8
     /// How far back prompt lookup searches for the last tokens.
     static let lookupWindow = 4096
@@ -186,7 +210,7 @@ public final class TokenGenerator {
             return generateSpeculative(prompt: prompt, stablePrefix: stablePrefix, sampler: sampler, maxTokens: maxTokens,
                                        shouldStop: shouldStop, onToken: onToken, draft: draft)
         }
-        if pipelined {
+        if pipelined, forcedToken == nil {
             return generatePipelined(prompt: prompt, stablePrefix: stablePrefix, sampler: sampler, maxTokens: maxTokens,
                                      shouldStop: shouldStop, onToken: onToken)
         }
@@ -198,7 +222,7 @@ public final class TokenGenerator {
         stats.generatedTokens = 0
         stats.decodeTokensPerSecond = 0
         while produced.count < maxTokens, prompt.count + produced.count < contextLimit, !shouldStop() {
-            let token = sampler.sample(logits, history: history).item(Int32.self)
+            let token = forcedToken?() ?? sampler.sample(logits, history: history).item(Int32.self)
             if !produced.isEmpty { afterStep?(0) }
             if produced.isEmpty {
                 stats.timeToFirstToken = ContinuousClock.now - started
@@ -272,8 +296,9 @@ public final class TokenGenerator {
             onToken(token)
             return room()
         }
+        func pick(_ logits: MLXArray) -> Int32 { forcedToken?() ?? sampler.sample(logits, history: history).item(Int32.self) }
         guard room() else { return [] }
-        var pending = sampler.sample(first, history: history).item(Int32.self)  // sampled, not yet in the cache
+        var pending = pick(first)  // sampled, not yet in the cache
         var length = 4
         while emit(pending) {
             let limit = min(length, maxTokens - produced.count, contextLimit - prompt.count - produced.count)
@@ -297,7 +322,7 @@ public final class TokenGenerator {
             var kept = 0, done = false
             pending = -1
             for (i, guess) in guesses.enumerated() {
-                let token = sampler.sample(logits[0, i], history: history).item(Int32.self)
+                let token = pick(logits[0, i])
                 guard token == guess else { pending = token; break }
                 kept += 1
                 if !emit(token) { done = true; break }
@@ -305,7 +330,7 @@ public final class TokenGenerator {
             for c in cache { (c as! InklingVisitCache).keep(1 + kept, of: input.count) }
             stats.acceptedTokens += kept
             if done { break }
-            if pending < 0 { pending = sampler.sample(logits[0, guesses.count], history: history).item(Int32.self) }
+            if pending < 0 { pending = pick(logits[0, guesses.count]) }
             length = kept == guesses.count ? min(length + 2, maxDraft) : max(2, kept + 1)
         }
         return produced

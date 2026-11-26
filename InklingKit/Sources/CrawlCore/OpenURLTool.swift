@@ -9,7 +9,7 @@ public struct OpenURLTool: Tool {
     let fetcher: any PageFetcher
     let maxChars: Int
 
-    public init(fetcher: any PageFetcher, maxChars: Int = 12_000) {
+    public init(fetcher: any PageFetcher, maxChars: Int = 3200) {
         self.fetcher = fetcher
         self.maxChars = maxChars
     }

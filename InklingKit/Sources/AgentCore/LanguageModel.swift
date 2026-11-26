@@ -6,6 +6,8 @@ public struct GenerateParameters: Sendable, Equatable {
     public var topK: Int = 0
     public var repetitionPenalty: Float = 1.0
     public var maxTokens: Int = 4096
+    /// Thinking tokens before the thought is closed (nil: no cap; the agent sets it from the effort).
+    public var maxThinkingTokens: Int?
     public init() {}
 }
 

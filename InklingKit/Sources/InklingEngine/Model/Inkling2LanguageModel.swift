@@ -59,6 +59,23 @@ public final class Inkling2LanguageModel: CausalLM {
     /// One per MoE layer when experts are streamed.
     var expertCaches: [ExpertCache] { model.layers.compactMap { $0.moe.cache } }
 
+    /// Expert use counts per streamed layer, saved between launches.
+    struct HeatFile: Codable, Equatable {
+        var identity: String
+        var layers: [[Int]]
+    }
+
+    func heat(identity: String) -> HeatFile { HeatFile(identity: identity, layers: expertCaches.map { $0.heat() }) }
+
+    /// Reads each layer's most-used experts (per `file`) into its slots in the background; false when it does not fit.
+    @discardableResult
+    func warm(from file: HeatFile, identity: String) -> Bool {
+        let caches = expertCaches
+        guard file.identity == identity, file.layers.count == caches.count else { return false }
+        for (cache, uses) in zip(caches, file.layers) { cache.warm(uses: uses) }
+        return true
+    }
+
     /// Turbo: expert picks replaced by a ready expert, and experts read in after a token (totals).
     private(set) var turboSkipped = 0, turboLoaded = 0, turboPicks = 0, turboRedone = 0
 

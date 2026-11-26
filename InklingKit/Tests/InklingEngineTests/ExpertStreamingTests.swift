@@ -354,6 +354,21 @@ extension FastPathTests {
     }
 }
 
+/// Which experts were used most survives a relaunch: saved use counts read the hottest experts in at load.
+@Test func savedHeatWarmsTheHottestExperts() throws {
+    let model = try ExpertStreamingTests.streamed(slots: 3)
+    let cache = model.expertCaches[0]
+    var uses = [Int](repeating: 0, count: cache.experts)
+    uses[5] = 9; uses[2] = 7; uses[6] = 4; uses[1] = 1
+    cache.warm(uses: uses)
+    cache.waitForLoads()
+    #expect(cache.resident([5, 2, 6, 1]) == [5, 2, 6])
+    #expect(cache.heat() == uses)
+    let saved = Inkling2LanguageModel.HeatFile(identity: "x", layers: [uses])
+    let decoded = try JSONDecoder().decode(Inkling2LanguageModel.HeatFile.self, from: JSONEncoder().encode(saved))
+    #expect(decoded == saved)
+}
+
 /// The shared read pool copies every piece exactly, with many callers at once and both priorities.
 @Test func expertReaderReadsEveryPiece() throws {
     let size = 5 << 20 + 12345

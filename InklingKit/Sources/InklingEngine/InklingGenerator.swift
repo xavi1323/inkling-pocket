@@ -34,6 +34,8 @@ public actor InklingGenerator: LanguageModel {
     public private(set) var stats = GenerationStats()
     /// Where the instructions' cache state is kept between launches (nil for test models).
     var promptCacheURL: URL?
+    /// Where expert use counts are kept between launches (nil for test models).
+    var heatURL: URL?
     private var savedPrefix: [Int32]?
     private var triedSavedPrefix = false
     private var promptCacheIdentity: String { "inkling-\(mappedWeightBytes)" }
@@ -58,8 +60,14 @@ public actor InklingGenerator: LanguageModel {
         let tokenizer = try InklingTokenizer(modelFolder: modelFolder)
         self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes, expertSlots: slots,
                   nonExpertBytes: nonExpert)
-        promptCacheURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appending(path: "inkling-prompt-cache.safetensors")
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        promptCacheURL = caches?.appending(path: "inkling-prompt-cache.safetensors")
+        heatURL = caches?.appending(path: "inkling-expert-heat.json")
+        // Start with last session's most-used experts in their slots instead of empty ones.
+        if let heatURL, let data = try? Data(contentsOf: heatURL),
+           let file = try? JSONDecoder().decode(Inkling2LanguageModel.HeatFile.self, from: data) {
+            model.warm(from: file, identity: promptCacheIdentity)
+        }
     }
 
     /// Slots per layer within `budget` bytes, in proportion to how often each layer is visited per token (the loop
@@ -160,8 +168,16 @@ public actor InklingGenerator: LanguageModel {
             var decoder = StreamingDecoder(tokenizer: tokenizer)
             var parser = InklingStreamParser()
             var ended = false
+            let budget = parameters.maxThinkingTokens.flatMap { cap in
+                tokenizer.specialTokenID(PromptFormatter.Token.thinking).flatMap { open in
+                    tokenizer.specialTokenID(PromptFormatter.Token.endMessage).map { ThinkingBudget(cap: cap, open: open, close: $0) }
+                }
+            }
+            generator.forcedToken = budget.map { b in { b.forced } }
+            defer { generator.forcedToken = nil }
             generator.generate(prompt: prompt, stablePrefix: stablePrefix, sampler: Sampler(parameters), maxTokens: parameters.maxTokens,
                                shouldStop: { Task.isCancelled || ended }) { token in
+                budget?.observe(token)
                 for event in parser.feed(decoder.append(token)) {
                     out.yield(event)
                     if event == .end { ended = true }
@@ -175,6 +191,13 @@ public actor InklingGenerator: LanguageModel {
         stats = generator.stats
         if !Task.isCancelled, !ended { out.yield(.end) }
         keepPrefixForNextLaunch()
+        keepHeatForNextLaunch()
+    }
+
+    private func keepHeatForNextLaunch() {
+        guard let heatURL, let lm = paths().reference as? Inkling2LanguageModel, !lm.expertCaches.isEmpty,
+              let data = try? JSONEncoder().encode(lm.heat(identity: promptCacheIdentity)) else { return }
+        try? data.write(to: heatURL, options: .atomic)
     }
 
     /// Tokens of tools + leading system messages + effort line: the same for every chat with these settings.

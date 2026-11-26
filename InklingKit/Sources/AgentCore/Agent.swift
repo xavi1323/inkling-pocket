@@ -3,7 +3,8 @@ import InklingCore
 
 public struct AgentSettings: Sendable {
     public var maxSteps = 8
-    public var toolResultTokenBudget = 2000
+    /// Every tool-result token is prompt the model reads before it can answer again.
+    public var toolResultTokenBudget = 1000
     public var contextCap = 16_384
     public var effort: ReasoningEffort = .low
     public var parameters = GenerateParameters()
@@ -61,8 +62,10 @@ public actor Agent {
             var thinking = "", answer = ""
             var calls: [ToolCall] = []
             var badCalls: [String] = []
+            var parameters = settings.parameters
+            if parameters.maxThinkingTokens == nil { parameters.maxThinkingTokens = settings.effort.thinkingTokenCap }
             for try await event in model.generate(messages, tools: tools.specs, effort: settings.effort,
-                                                  parameters: settings.parameters) {
+                                                  parameters: parameters) {
                 switch event {
                 case .thinking(let t): thinking += t; emit(.thinking(t))
                 case .answer(let a): answer += a; emit(.answer(a))

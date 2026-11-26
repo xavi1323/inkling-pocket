@@ -8,7 +8,10 @@ public struct WebSearchTool: Tool {
     let crawlTopN: Int
     let perPageChars: Int
 
-    public init(fetcher: any PageFetcher, crawlTopN: Int = 3, perPageChars: Int = 1500) {
+    /// Results listed (the rest are rarely used and cost reading time).
+    static let maxResults = 5
+
+    public init(fetcher: any PageFetcher, crawlTopN: Int = 2, perPageChars: Int = 1200) {
         self.fetcher = fetcher
         self.crawlTopN = crawlTopN
         self.perPageChars = perPageChars
@@ -30,7 +33,7 @@ public struct WebSearchTool: Tool {
         } catch {
             return "search unavailable: \(error.localizedDescription)"
         }
-        let results = Array(DuckDuckGoParser.parse(html: page.html ?? "").prefix(8))
+        let results = Array(DuckDuckGoParser.parse(html: page.html ?? "").prefix(Self.maxResults))
         guard !results.isEmpty else { return "No results for \"\(query)\"." }
 
         let top = Array(results.prefix(crawlTopN))

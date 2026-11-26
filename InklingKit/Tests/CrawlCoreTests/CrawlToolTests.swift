@@ -89,3 +89,26 @@ let ddgFixture = try! String(contentsOf: Bundle.module.url(forResource: "Fixture
 @Test func openURLRejectsNonHTTP() async {
     await #expect(throws: ToolError.self) { try await OpenURLTool(fetcher: FakeFetcher()).run([("url", .string("file:///etc/passwd"))]) }
 }
+
+/// Search results stay short (they are prompt the model must read before answering): 5 results, 2 pages read,
+/// at most 1,200 characters of each page.
+@Test func searchKeepsResultsShort() async throws {
+    var pages: [String: FetchedPage] = ["https://html.duckduckgo.com/html/": FetchedPage(html: ddgFixture, finalURL: URL(string: "https://html.duckduckgo.com/html/")!, contentType: "text/html", byteCount: 1)]
+    let long = String(repeating: "Long enough body text about Swift so the pruning filter keeps this paragraph. ", count: 60)
+    for p in ["https://www.swift.org/", "https://en.wikipedia.org/", "https://developer.apple.com/"] {
+        pages[p] = html("<article><h1>Page</h1><p>\(long)</p></article>", url: p)
+    }
+    let fetcher = FakeFetcher(pages: pages)
+    let out = try await WebSearchTool(fetcher: fetcher).run([("query", .string("swift"))])
+    #expect(fetcher.fetched.count == 3)  // results page + 2 crawls
+    #expect(out.contains("[5]"))
+    #expect(!out.contains("[6]"))
+    #expect(out.count < 4200)
+}
+
+@Test func openURLDefaultsToAShortPage() async throws {
+    let para = "<p>" + String(repeating: "word ", count: 200) + "</p>\n"
+    let out = try await OpenURLTool(fetcher: FakeFetcher(pages: ["https://big.page/": html(String(repeating: para, count: 50), url: "https://big.page/")]))
+        .run([("url", .string("https://big.page/"))])
+    #expect(out.count <= 3200 + 200)
+}
