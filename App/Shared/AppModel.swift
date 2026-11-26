@@ -18,6 +18,9 @@ final class AppModel {
     let container: ModelContainer
     let settings = AppSettings()
     var selection: SidebarItem?
+    var modelFolder: URL?
+    var skippedImport = false
+    @ObservationIgnored let location = ModelLocation()
     @ObservationIgnored let factStore: SwiftDataFactStore
     @ObservationIgnored let fetcher: any PageFetcher
     @ObservationIgnored private var sessions: [UUID: ChatSession] = [:]
@@ -28,6 +31,11 @@ final class AppModel {
         self.container = container
         factStore = SwiftDataFactStore(container: container, embedder: NLEmbedder())
         fetcher = HybridFetcher()
+        modelFolder = location.currentModelFolder()
+    }
+
+    func refreshModelFolder() {
+        modelFolder = location.currentModelFolder()
     }
 
     func newChat() {

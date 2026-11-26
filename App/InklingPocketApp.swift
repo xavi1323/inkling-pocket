@@ -24,6 +24,14 @@ struct RootView: View {
     @Environment(AppModel.self) private var app
 
     var body: some View {
+        if app.modelFolder == nil && !app.skippedImport {
+            ImportView()
+        } else {
+            mainView
+        }
+    }
+
+    private var mainView: some View {
         NavigationSplitView {
             SidebarView()
         } detail: {
