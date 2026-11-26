@@ -52,7 +52,7 @@ final class SparseMoE {
             let flat = indices.flattened()
             let order = argSort(flat, axis: -1)
             let inverse = argSort(order, axis: -1)
-            let rows = take(x.reshaped([b * length, 1, d]), order / Int32(routes), axis: 0)
+            let rows = take(x.reshaped([b * length, 1, d]), floorDivide(order, Int32(routes)), axis: 0)  // integer division, like `//`
             let idx = take(flat, order, axis: 0)
             let up = upProj(rows, idx, sorted: true)
             let gate = gateProj(rows, idx, sorted: true)

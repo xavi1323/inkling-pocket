@@ -118,12 +118,14 @@ extension InklingGenerator {
             progress("Comparing paths \(i + 1)/\(SelfTest.comparePrompts.count)…")
             let tokens = tokenizer.encode(PromptFormatter.render(messages: [ChatMessage(role: .user, content: prompt)], tools: [], effort: .none))
             let gen = TokenGenerator(model: reference, eos: [])
-            let continuation = gen.generate(prompt: tokens, sampler: Sampler(greedy), maxTokens: SelfTest.continuationTokens,
-                                            shouldStop: { Task.isCancelled }, onToken: { _ in })
+            let continuation = try withError { gen.generate(prompt: tokens, sampler: Sampler(greedy), maxTokens: SelfTest.continuationTokens,
+                                            shouldStop: { Task.isCancelled }, onToken: { _ in }) }
             try Task.checkCancellation()
             sequences.append(tokens + continuation)
         }
-        let comparison = SelfTest.compare(reference: reference, fast: fast, sequences: sequences, scored: SelfTest.continuationTokens)
+        let comparison = try withError {
+            SelfTest.compare(reference: reference, fast: fast, sequences: sequences, scored: SelfTest.continuationTokens)
+        }
         var answers: [KnownAnswer] = []
         greedy.maxTokens = 48
         for (i, item) in SelfTest.knownAnswers.enumerated() {

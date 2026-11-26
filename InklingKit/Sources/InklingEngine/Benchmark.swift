@@ -104,7 +104,9 @@ extension InklingGenerator {
         progress("Prefill \(tokens.count) tokens, decode \(decodeTokens)…")
         let gen = TokenGenerator(model: model, eos: [])
         gen.pipelined = generator.pipelined
-        gen.generate(prompt: tokens, sampler: Sampler(greedy), maxTokens: decodeTokens, shouldStop: { Task.isCancelled }, onToken: { _ in })
+        try withError {
+            gen.generate(prompt: tokens, sampler: Sampler(greedy), maxTokens: decodeTokens, shouldStop: { Task.isCancelled }, onToken: { _ in })
+        }
         try Task.checkCancellation()
         var report = BenchmarkReport()
         report.enginePath = path
@@ -124,7 +126,7 @@ extension InklingGenerator {
             let stats = RoutingStats(visits: lm.config.layerVisits, numExperts: lm.config.numExperts)
             lm.routing = stats
             defer { lm.routing = nil }
-            _ = lm(MLXArray(Array(tokens.prefix(128))).reshaped([1, -1]), cache: lm.makeCache())
+            try withError { eval(lm(MLXArray(Array(tokens.prefix(128))).reshaped([1, -1]), cache: lm.makeCache())) }
             report.routing = stats.summary
             report.passOverlap = stats.overlapSummary
         }

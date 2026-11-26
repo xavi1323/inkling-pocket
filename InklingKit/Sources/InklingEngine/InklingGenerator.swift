@@ -105,18 +105,23 @@ public actor InklingGenerator: LanguageModel {
         guard prompt.count < generator.contextLimit else {
             throw GenerationError.contextFull(prompt: prompt.count, limit: generator.contextLimit)
         }
-        var decoder = StreamingDecoder(tokenizer: tokenizer)
-        var parser = InklingStreamParser()
-        var ended = false
-        generator.generate(prompt: prompt, sampler: Sampler(parameters), maxTokens: parameters.maxTokens,
-                           shouldStop: { Task.isCancelled || ended }) { token in
-            for event in parser.feed(decoder.append(token)) {
-                out.yield(event)
-                if event == .end { ended = true }
+        // MLX errors become a thrown error (shown in the chat) instead of crashing the app.
+        let generator = self.generator, tokenizer = self.tokenizer
+        let ended = try withError { () -> Bool in
+            var decoder = StreamingDecoder(tokenizer: tokenizer)
+            var parser = InklingStreamParser()
+            var ended = false
+            generator.generate(prompt: prompt, sampler: Sampler(parameters), maxTokens: parameters.maxTokens,
+                               shouldStop: { Task.isCancelled || ended }) { token in
+                for event in parser.feed(decoder.append(token)) {
+                    out.yield(event)
+                    if event == .end { ended = true }
+                }
             }
-        }
-        if !ended {
-            for event in parser.feed(decoder.flush()) + parser.finish() { out.yield(event) }
+            if !ended {
+                for event in parser.feed(decoder.flush()) + parser.finish() { out.yield(event) }
+            }
+            return ended
         }
         stats = generator.stats
         if !Task.isCancelled, !ended { out.yield(.end) }

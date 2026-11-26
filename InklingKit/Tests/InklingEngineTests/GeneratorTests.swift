@@ -153,3 +153,19 @@ func greedy() -> GenerateParameters {
         #expect(checks > 0)
     }
 }
+
+@Suite(.serialized) struct LongPromptTests {
+    init() { Device.setDefault(device: .cpu) }
+
+    /// ≥ 64 routed rows take the sorted-experts path (real model: any prompt of 8+ tokens). It must match the
+    /// unsorted path, which short chunks use.
+    @Test func longPromptSortedPathMatchesShortChunks() throws {
+        let tokens = (0..<40).map { Int32(($0 * 37 + 11) % 500) }
+        let whole = TokenGenerator(model: try Tiny.model(), eos: [])
+        whole.prefillChunk = 40
+        let chunked = TokenGenerator(model: try Tiny.model(), eos: [])
+        chunked.prefillChunk = 8
+        let a = whole.prefill(tokens), b = chunked.prefill(tokens)
+        #expect(abs(a - b).max().item(Float.self) < 1e-2)
+    }
+}
