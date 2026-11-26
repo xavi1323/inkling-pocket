@@ -46,6 +46,8 @@ public final class TokenGenerator {
     private var cache: [LayerVisitCache]
     /// The last prompt, the cache state right after it, and its final logits.
     private var mark: (tokens: [Int32], snapshot: [VisitSnapshot], logits: MLXArray)?
+    /// The cache state after the last prompt's stable prefix (tools + instructions), for new chats.
+    private var prefixMark: (tokens: [Int32], snapshot: [VisitSnapshot])?
 
     public init(model: CausalLM, eos: Set<Int32>) {
         self.model = model
@@ -54,11 +56,15 @@ public final class TokenGenerator {
     }
 
     /// Feeds the prompt (only the part after the previous prompt, when that is a prefix) and returns logits [V].
+    /// `stablePrefix`: how many leading tokens are the same for every chat (tools + instructions); the cache state
+    /// after them is kept so a new chat starts from there.
     @discardableResult
-    public func prefill(_ prompt: [Int32]) -> MLXArray { prefill(prompt, shouldStop: { false })! }
+    public func prefill(_ prompt: [Int32], stablePrefix: Int = 0) -> MLXArray {
+        prefill(prompt, stablePrefix: stablePrefix, shouldStop: { false })!
+    }
 
     /// As `prefill(_:)`, but checks `shouldStop` between chunks; returns nil (and forgets the prompt) when stopped.
-    func prefill(_ prompt: [Int32], shouldStop: () -> Bool) -> MLXArray? {
+    func prefill(_ prompt: [Int32], stablePrefix: Int = 0, shouldStop: () -> Bool) -> MLXArray? {
         precondition(!prompt.isEmpty, "empty prompt")
         let start = Date()
         var from = 0
@@ -67,18 +73,32 @@ public final class TokenGenerator {
             for (c, s) in zip(cache, mark.snapshot) { (c as? InklingVisitCache)?.restore(s) }
             from = mark.tokens.count
             logits = mark.logits
+        } else if let prefixMark, prompt.count > prefixMark.tokens.count, prompt.starts(with: prefixMark.tokens) {
+            // Same caches the prefix was saved on (a fresh cache drops `prefixMark`), so its K/V are still there.
+            for (c, s) in zip(cache, prefixMark.snapshot) { (c as? InklingVisitCache)?.restore(s) }
+            from = prefixMark.tokens.count
+            mark = nil
         } else {
             cache = model.makeCache()
+            mark = nil
+            prefixMark = nil
         }
+        let keepPrefix = stablePrefix > from && stablePrefix < prompt.count
         var i = from
         while i < prompt.count {
-            let end = min(i + prefillChunk, prompt.count)
+            var end = min(i + prefillChunk, prompt.count)
+            if keepPrefix, i < stablePrefix { end = min(end, stablePrefix) }
             let out = model(MLXArray(Array(prompt[i..<end])).reshaped([1, -1]), cache: cache)
             logits = out[0, -1]
             eval(logits!)
             i = end
+            if keepPrefix, i == stablePrefix {
+                let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
+                prefixMark = snapshots.count == cache.count ? (Array(prompt[..<stablePrefix]), snapshots) : nil
+            }
             if i < prompt.count, shouldStop() {
                 mark = nil
+                prefixMark = nil
                 cache = model.makeCache()
                 return nil
             }
@@ -97,11 +117,14 @@ public final class TokenGenerator {
     /// Generates up to `maxTokens` (stopping at EOS, the context limit or when `shouldStop()` is true),
     /// calling `onToken` for each token. Returns the tokens (without EOS).
     @discardableResult
-    public func generate(prompt: [Int32], sampler: Sampler, maxTokens: Int, shouldStop: () -> Bool,
+    public func generate(prompt: [Int32], stablePrefix: Int = 0, sampler: Sampler, maxTokens: Int, shouldStop: () -> Bool,
                          onToken: (Int32) -> Void) -> [Int32] {
-        if pipelined { return generatePipelined(prompt: prompt, sampler: sampler, maxTokens: maxTokens, shouldStop: shouldStop, onToken: onToken) }
+        if pipelined {
+            return generatePipelined(prompt: prompt, stablePrefix: stablePrefix, sampler: sampler, maxTokens: maxTokens,
+                                     shouldStop: shouldStop, onToken: onToken)
+        }
         let started = ContinuousClock.now
-        guard var logits = prefill(prompt, shouldStop: shouldStop) else { return [] }
+        guard var logits = prefill(prompt, stablePrefix: stablePrefix, shouldStop: shouldStop) else { return [] }
         var produced: [Int32] = []
         var history = prompt.suffix(sampler.penaltyWindow).map { $0 }
         var decodeStart: ContinuousClock.Instant?
@@ -131,11 +154,11 @@ public final class TokenGenerator {
 
     /// Same tokens as `generate`; the next step's graph is built and queued while the GPU still runs the current one.
     /// Stopping at EOS leaves one extra token in the cache, which the next prefill discards (it restores the prompt snapshot).
-    func generatePipelined(prompt: [Int32], sampler: Sampler, maxTokens: Int, shouldStop: () -> Bool,
+    func generatePipelined(prompt: [Int32], stablePrefix: Int = 0, sampler: Sampler, maxTokens: Int, shouldStop: () -> Bool,
                            onToken: (Int32) -> Void) -> [Int32] {
         let started = ContinuousClock.now
         let gpu = GPUSampler(sampler)
-        guard let logits = prefill(prompt, shouldStop: shouldStop) else { return [] }
+        guard let logits = prefill(prompt, stablePrefix: stablePrefix, shouldStop: shouldStop) else { return [] }
         var history: MLXArray? = gpu.usesHistory ? MLXArray(Array(prompt.suffix(sampler.penaltyWindow))) : nil
         var produced: [Int32] = []
         var decodeStart: ContinuousClock.Instant?

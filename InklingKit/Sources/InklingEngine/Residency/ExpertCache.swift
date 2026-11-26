@@ -11,7 +11,8 @@ import InklingCore
 ///
 /// Callers must make sure no queued GPU work still reads a slot before `ensure` refills it (SparseMoE evaluates the
 /// routing first, which forces every earlier step).
-final class ExpertCache {
+/// `@unchecked Sendable`: all slot state changes run on `queue`.
+final class ExpertCache: @unchecked Sendable {
     static let projections = ["gate_proj", "up_proj", "down_proj"]
     static let parts = [".weight", ".scales", ".biases"]
 
@@ -41,6 +42,10 @@ final class ExpertCache {
     private var clock: UInt64 = 0
     private(set) var hits = 0
     private(set) var misses = 0
+    /// Experts read ahead by `prefetch`.
+    private(set) var prefetched = 0
+    /// Serialises slot changes: `ensure` (generation thread) and `prefetch` (background).
+    private let queue = DispatchQueue(label: "inkling.expert-cache", qos: .userInitiated)
 
     /// Per-expert bytes of one layer's three projections (weights, scales, biases).
     static func bytesPerExpert(path: String, weights: MappedSafetensors, prefix: String, experts: Int) -> Int64 {
@@ -133,18 +138,32 @@ final class ExpertCache {
     func slot(of expert: Int) -> Int? { slotOf[expert] }
 
     /// Puts `experts` (at most `slots` distinct ids) into slots, copying the missing ones; returns expert → slot.
+    /// Waits for a running `prefetch` first.
     func ensure(_ experts: [Int]) -> [Int: Int32] {
         precondition(Set(experts).count <= slots, "more experts than slots")
+        return queue.sync { fill(experts, counting: true) }
+    }
+
+    /// Reads experts in the background (a guess at what the next step needs). Only call while no queued GPU work
+    /// reads this layer's slots.
+    func prefetch(_ experts: [Int]) {
+        guard Set(experts).count <= slots else { return }
+        queue.async { [self] in _ = fill(experts, counting: false) }
+    }
+
+    private func fill(_ experts: [Int], counting: Bool) -> [Int: Int32] {
         clock += 1
-        if clock % Self.agingPeriod == 0 { uses = uses.map { $0 / 2 } }
-        for e in Set(experts) { uses[e] += 1 }
+        if counting {
+            if clock % Self.agingPeriod == 0 { uses = uses.map { $0 / 2 } }
+            for e in Set(experts) { uses[e] += 1 }
+        }
         var map: [Int: Int32] = [:]
         var missing: [Int] = []
         for e in experts where map[e] == nil {
             if let s = slotOf[e] {
                 lastUse[s] = clock
                 map[e] = Int32(s)
-                hits += 1
+                if counting { hits += 1 }
             } else if !missing.contains(e) {
                 missing.append(e)
             }
@@ -163,7 +182,7 @@ final class ExpertCache {
             map[e] = Int32(s)
             jobs.append((e, s))
         }
-        misses += jobs.count
+        if counting { misses += jobs.count } else { prefetched += jobs.count }
         let parts = self.parts, copies = jobs
         DispatchQueue.concurrentPerform(iterations: jobs.count * parts.count) { i in
             let job = copies[i / parts.count], part = parts[i % parts.count]

@@ -130,6 +130,10 @@ public actor InklingGenerator: LanguageModel {
     private func run(_ messages: [ChatMessage], _ tools: [ToolSpec], _ effort: ReasoningEffort,
                      _ parameters: GenerateParameters, _ out: AsyncThrowingStream<ModelEvent, Error>.Continuation) throws {
         let prompt = tokenizer.encode(PromptFormatter.render(messages: messages, tools: tools, effort: effort))
+        // Tools + leading system messages + effort line are the same for every chat with these settings.
+        let leading = Array(messages.prefix { $0.role == .system })
+        let head = tokenizer.encode(PromptFormatter.render(messages: leading, tools: tools, effort: effort))
+        let stablePrefix = !leading.isEmpty && head.count < prompt.count && prompt.starts(with: head) ? head.count : 0
         guard prompt.count < generator.contextLimit else {
             throw GenerationError.contextFull(prompt: prompt.count, limit: generator.contextLimit)
         }
@@ -139,7 +143,7 @@ public actor InklingGenerator: LanguageModel {
             var decoder = StreamingDecoder(tokenizer: tokenizer)
             var parser = InklingStreamParser()
             var ended = false
-            generator.generate(prompt: prompt, sampler: Sampler(parameters), maxTokens: parameters.maxTokens,
+            generator.generate(prompt: prompt, stablePrefix: stablePrefix, sampler: Sampler(parameters), maxTokens: parameters.maxTokens,
                                shouldStop: { Task.isCancelled || ended }) { token in
                 for event in parser.feed(decoder.append(token)) {
                     out.yield(event)

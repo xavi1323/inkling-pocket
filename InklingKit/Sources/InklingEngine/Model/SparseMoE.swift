@@ -49,26 +49,50 @@ final class SparseMoE {
         return (tanh(g / gateCap) * gateCap * sigmoid(g) * tanh(u / upCap) * upCap).asType(gate.dtype)
     }
 
+    /// The MoE of the next layer visit (set by TextModel before each visit): its experts are read ahead.
+    weak var next: SparseMoE?
+
     func callAsFunction(_ x: MLXArray, onRoute: ((MLXArray) -> Void)? = nil, fast: Bool = false) -> MLXArray {
         let (indices, weights) = route(x)
         onRoute?(indices)
         guard let cache else { return experts(x, indices, weights, fast: fast) }
-        // Streaming: read the routing back, bring the experts into slots, run in batches that fit the slots.
+        let (b, length, d) = (x.dim(0), x.dim(1), x.dim(2))
+        // Single token: guess the next visit's experts from this input (its router on our input) and read them in
+        // while the GPU works. Safe: everything queued before reading the routing back has finished, and the work
+        // queued after it only reads this layer's slots.
+        let guess = b * length == 1 && next?.cache != nil ? next!.route(x).0 : nil
+        eval([indices] + (guess.map { [$0] } ?? []))
         let ids = indices.asArray(Int32.self)
+        if let guess, let nextCache = next?.cache { nextCache.prefetch(guess.asArray(Int32.self).map(Int.init)) }
         var unique: [Int] = []
         var seen = Set<Int>()
         for id in ids where seen.insert(Int(id)).inserted { unique.append(Int(id)) }
-        var total: MLXArray?
-        for start in stride(from: 0, to: unique.count, by: cache.slots) {
-            if let total { eval(total) }  // the slots are about to be refilled
-            let map = cache.ensure(Array(unique[start..<min(start + cache.slots, unique.count)]))
-            let slots = MLXArray(ids.map { map[Int($0)] ?? 0 }).reshaped(indices.shape)
-            if unique.count <= cache.slots { return experts(x, slots, weights, fast: fast) }
-            let mask = MLXArray(ids.map { map[Int($0)] == nil ? Float(0) : 1 }).reshaped(indices.shape)
-            let part = experts(x, slots, weights * mask, fast: false, keepFP32: true)
-            total = total.map { $0 + part } ?? part
+        if unique.count <= cache.slots {
+            let map = cache.ensure(unique)
+            let out = experts(x, MLXArray(ids.map { map[Int($0)]! }).reshaped(indices.shape), weights, fast: fast)
+            asyncEval(out)  // start the GPU while the next layer's graph is built
+            return out
         }
-        return total!.asType(x.dtype)
+        // More experts than slots (long prompt chunks): run them in groups, each over only the routes it serves.
+        let k = indices.dim(-1)
+        let flatX = x.reshaped([b * length, d]), flatW = weights.reshaped([-1])
+        var total = MLXArray.zeros([b * length, d], dtype: .float32)
+        for start in stride(from: 0, to: unique.count, by: cache.slots) {
+            if start > 0 { eval(total) }  // the slots are about to be refilled
+            let map = cache.ensure(Array(unique[start..<min(start + cache.slots, unique.count)]))
+            var routes: [(position: Int32, slot: Int32)] = []
+            for (i, id) in ids.enumerated() { if let s = map[Int(id)] { routes.append((Int32(i), s)) } }
+            routes.sort { $0.slot < $1.slot }
+            let tokens = MLXArray(routes.map { $0.position / Int32(k) })
+            let slots = MLXArray(routes.map(\.slot))
+            let rows = take(flatX, tokens, axis: 0).expandedDimensions(axis: 1)
+            let up = upProj(rows, slots, sorted: true)
+            let gate = gateProj(rows, slots, sorted: true)
+            let down = downProj(activation(up: up, gate: gate), slots, sorted: true).reshaped([routes.count, d])
+            let w = take(flatW, MLXArray(routes.map(\.position)), axis: 0).expandedDimensions(axis: -1)
+            total = total.at[tokens].add(down.asType(.float32) * w)
+        }
+        return total.reshaped([b, length, d]).asType(x.dtype)
     }
 
     /// Routed experts' weighted sum; `indices` address `gateProj`/`upProj`/`downProj` (experts, or slots when streaming).

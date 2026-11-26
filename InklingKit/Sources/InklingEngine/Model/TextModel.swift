@@ -64,6 +64,7 @@ final class TextModel {
                     collector?.add(visit: visit, experts: experts)
                 }
             }
+            layers[index].moe.next = visit + 1 < visits.count ? layers[visits[visit + 1]].moe : nil
             x = layers[index](x, blocks: &blocks, cache: cache?[visit], messages: messages, onRoute: onRoute, fast: fast)
         }
         collector?.endPass()

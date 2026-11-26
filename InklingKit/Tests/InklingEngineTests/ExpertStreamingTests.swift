@@ -36,6 +36,7 @@ import InklingCore
         let caches = model.expertCaches
         #expect(!caches.isEmpty)
         #expect(caches.allSatisfy { $0.misses > 3 && $0.hits > 0 })
+        #expect(caches.dropFirst().contains { $0.prefetched > 0 })  // next visit's experts are read ahead
     }
 
     /// A long chunk needs more experts than there are slots: they are run in batches.
@@ -109,4 +110,30 @@ import InklingCore
     #expect(MemoryBudget.budget(available: 5_000_000_000, physical: ipad, overrideGB: nil) == 5_000_000_000 - MemoryBudget.safetyMargin)
     #expect(MemoryBudget.budget(available: nil, physical: ipad, overrideGB: nil) == MemoryBudget.fallback)
     #expect(MemoryBudget.budget(available: 10_500_000_000, physical: ipad, overrideGB: 3) == 3_000_000_000)
+}
+
+/// A new chat with the same instructions skips them: the cache state after the stable prefix is kept.
+@Suite(.serialized) struct PrefixReuseTests {
+    init() { Device.setDefault(device: .cpu) }
+
+    @Test func newPromptWithSamePrefixSkipsIt() throws {
+        let prefix = (0..<20).map { Int32(($0 * 13 + 5) % 500) }
+        let a = prefix + [7, 8, 9, 10], b = prefix + [11, 12, 13]
+        let gen = TokenGenerator(model: try Tiny.model(), eos: [])
+        gen.prefillChunk = 8
+        gen.prefill(a, stablePrefix: prefix.count)
+        let reused = gen.prefill(b, stablePrefix: prefix.count)
+        #expect(gen.stats.prefilledTokens == b.count - prefix.count)
+        let fresh = TokenGenerator(model: try Tiny.model(), eos: [])
+        fresh.prefillChunk = 8
+        let expected = fresh.prefill(b, stablePrefix: prefix.count)
+        #expect(abs(reused - expected).max().item(Float.self) == 0)
+    }
+
+    @Test func differentPrefixStartsOver() throws {
+        let gen = TokenGenerator(model: try Tiny.model(), eos: [])
+        gen.prefill([1, 2, 3, 4, 5], stablePrefix: 3)
+        gen.prefill([9, 2, 3, 4], stablePrefix: 3)
+        #expect(gen.stats.prefilledTokens == 4)
+    }
 }
