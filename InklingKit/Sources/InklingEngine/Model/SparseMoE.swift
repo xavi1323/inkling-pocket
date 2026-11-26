@@ -59,6 +59,28 @@ final class SparseMoE {
         rankedGuess(x)
     }
 
+    /// Turbo: this token's expert table (`ExpertCache.turboTable` as arrays), set between tokens; nil = exact.
+    var turboTable: (slots: MLXArray, ready: MLXArray)?
+    /// Turbo: (wanted, used) experts of each visit this token, read back between tokens.
+    var turboRoutes: [(wanted: MLXArray, used: MLXArray)] = []
+
+    /// Turbo router: [wanted ids, used ids, their slots, weights]. Experts not ready are replaced by the best ready
+    /// ones; weights are renormalised over what runs (a missing expert gets weight 0).
+    func turboRoute(_ a: [MLXArray]) -> [MLXArray] {
+        let (x, slots, ready) = (a[0], a[1], a[2])
+        let scores = sigmoid(matmul(x.asType(.float32), gateWeight.asType(.float32).T))
+        let selection = scores + scoreBias
+        let wanted = argPartition(-selection, kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+        let used = argPartition(-(selection + (ready - 1) * 1e9), kth: topK - 1, axis: -1)[.ellipsis, ..<topK]
+        var weights = takeAlong(scores * ready, used, axis: -1)
+        weights = weights / (weights.sum(axis: -1, keepDims: true) + 1e-20) * routeScale
+        return [wanted, used, take(slots, used), weights]
+    }
+
+    private lazy var compiledTurbo: ([MLXArray]) -> [MLXArray] = compile(inputs: [], outputs: []) { [unowned self] a in
+        turboRoute(a)
+    }
+
     /// The router for this step: compiled for single tokens on the fast path.
     func route(_ x: MLXArray, fast: Bool) -> (MLXArray, MLXArray) {
         fast && Ops.useFused && x.dim(0) * x.dim(1) == 1 ? compiledRoute(x) : route(x)
@@ -76,6 +98,13 @@ final class SparseMoE {
     var ignoreRouting = false
 
     func callAsFunction(_ x: MLXArray, onRoute: ((MLXArray) -> Void)? = nil, fast: Bool = false) -> MLXArray {
+        if let table = turboTable, cache != nil, !ignoreRouting, x.dim(0) * x.dim(1) == 1 {
+            let inputs = [x, table.slots, table.ready]
+            let r = fast && Ops.useFused ? compiledTurbo(inputs) : turboRoute(inputs)
+            onRoute?(r[1])
+            turboRoutes.append((r[0], r[1]))
+            return experts(x, r[2], r[3], fast: fast)
+        }
         let (indices, weights) = route(x, fast: fast)
         onRoute?(indices)
         guard let cache else { return experts(x, indices, weights, fast: fast) }

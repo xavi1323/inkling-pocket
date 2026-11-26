@@ -303,3 +303,53 @@ import InklingCore
         #expect(abs(reused - expected).max().item(Float.self) == 0)
     }
 }
+
+/// Turbo decode: routing and expert lookup stay on the GPU (no waits inside a token); an expert that is not in a slot
+/// is replaced by the best one that is, and read in after the token.
+/// In `FastPathTests` (serialized): its GPU-device tests would otherwise send turbo's compiled router to the CPU.
+extension FastPathTests {
+    var turboPrompt: [Int32] { (0..<40).map { Int32(($0 * 37 + 11) % 500) } }
+
+    @Test func turboMatchesExactWhenEveryExpertIsInASlot() throws {
+        let experts = try Tiny.config().text.numExperts
+        let exact = try ExpertStreamingTests.streamed(slots: experts)
+        let turbo = try ExpertStreamingTests.streamed(slots: experts)
+        for cache in exact.expertCaches + turbo.expertCaches { _ = cache.ensure(Array(0..<experts)) }
+        let a = TokenGenerator(model: FastPath(exact), eos: [])
+            .generate(prompt: turboPrompt, sampler: Sampler(greedy()), maxTokens: 12, shouldStop: { false }, onToken: { _ in })
+        let b = TokenGenerator(model: TurboPath(turbo), eos: [])
+            .generate(prompt: turboPrompt, sampler: Sampler(greedy()), maxTokens: 12, shouldStop: { false }, onToken: { _ in })
+        #expect(a == b)
+        #expect(turbo.turboSkipped == 0)
+    }
+
+    @Test func turboSkipsMissingExpertsThenReadsThemIn() throws {
+        let model = try ExpertStreamingTests.streamed(slots: 3)
+        let turbo = TurboPath(model)
+        let cache = model.makeCache()
+        _ = turbo(MLXArray(turboPrompt).reshaped([1, -1]), cache: cache)
+        var rows: [MLXArray] = []
+        for t in turboPrompt.prefix(8) {
+            let row = turbo(MLXArray([t]).reshaped([1, 1]), cache: cache)[0, -1]
+            eval(row)
+            rows.append(row)
+        }
+        #expect(stacked(rows).asType(.float32).sum().item(Float.self).isFinite)
+        #expect(model.turboSkipped > 0)
+        #expect(model.turboLoaded > 0)
+        model.finishTurboLoads()
+        for c in model.expertCaches { _ = c.turboTable() }  // tables stay consistent after the reads finish
+    }
+
+    /// Never more experts being read than leaves a token's worth ready: the table always has `topK` ready experts.
+    @Test func turboKeepsATokensWorthOfExpertsReady() throws {
+        let model = try ExpertStreamingTests.streamed(slots: 3)
+        let cache = model.expertCaches[0]
+        _ = cache.ensure([0, 1, 2])
+        cache.readDelay = 0.2
+        cache.readIn([3, 4, 5, 6], keepReady: 2)
+        let (_, ready) = cache.turboTable()
+        #expect(ready.filter { $0 == 1 }.count >= 2)
+        cache.waitForLoads()
+    }
+}

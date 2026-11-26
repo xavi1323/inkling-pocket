@@ -296,6 +296,67 @@ final class ExpertCache: @unchecked Sendable {
         }
     }
 
+    // MARK: Turbo (no waits inside a token)
+
+    /// Turbo: each expert's slot (`safe`, a ready slot, when it has none) and 1 when it is ready (in a slot and not
+    /// being read). The GPU picks only ready experts, so reads may run while it works.
+    func turboTable() -> (slots: [Int32], ready: [Float]) {
+        queue.sync {
+            let safe = (0..<slots).first { expertIn[$0] != nil && loading[$0] == nil } ?? 0
+            var table = [Int32](repeating: Int32(safe), count: experts), ready = [Float](repeating: 0, count: experts)
+            for (e, s) in slotOf where loading[s] == nil {
+                table[e] = Int32(s)
+                ready[e] = 1
+            }
+            return (table, ready)
+        }
+    }
+
+    /// Turbo: a token wanted `wanted` and ran `used` (ready ones): the use counts and hits/misses `ensure` keeps.
+    func touch(wanted: [Int], used: [Int]) {
+        queue.sync {
+            clock += 1
+            if clock % Self.agingPeriod == 0 { uses = uses.map { $0 / 2 } }
+            let ran = Set(used)
+            for e in Set(wanted) {
+                uses[e] += 1
+                if ran.contains(e) { hits += 1 } else { misses += 1 }
+            }
+            for e in ran { if let s = slotOf[e] { lastUse[s] = clock } }
+        }
+    }
+
+    /// Turbo: reads `experts` in the background into the least-used slots, leaving at least `keepReady` ready.
+    /// Only call between tokens (no queued GPU work may read the slots this takes).
+    func readIn(_ experts: [Int], keepReady: Int) {
+        let delay = readDelay, group = DispatchGroup()
+        group.enter()
+        queue.async { [self] in
+            let ready = (0..<slots).filter { expertIn[$0] != nil && loading[$0] == nil }.count
+            var wanted: [Int] = []
+            for e in experts where slotOf[e] == nil && !wanted.contains(e) { wanted.append(e) }
+            wanted = Array(wanted.prefix(max(0, ready - keepReady)))
+            guard !wanted.isEmpty, let r = reserve(wanted, counting: false, group: group), !r.jobs.isEmpty else {
+                group.leave()
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                read(r.jobs, counting: false, delay: delay)
+                queue.sync { finish(r.jobs, group: group) }
+                group.leave()
+            }
+        }
+    }
+
+    /// Waits for every read in flight.
+    func waitForLoads() {
+        while true {
+            let groups = queue.sync { Array(loading.values) }
+            if groups.isEmpty { return }
+            for g in groups { g.wait() }
+        }
+    }
+
     private struct Reservation {
         var map: [Int: Int32]
         var jobs: [(expert: Int, slot: Int)]
@@ -350,8 +411,7 @@ final class ExpertCache: @unchecked Sendable {
                 slotOf[old] = nil
                 unusedPrefetch.removeValue(forKey: old)
             }
-            if !counting {
-                let rank = ranks[e] ?? experts.firstIndex(of: e) ?? 0
+            if !counting, let rank = ranks[e] {
                 unusedPrefetch[e] = rank
                 if rank < StreamProfile.ranks { profile?.update { $0.prefetchedByRank[rank] += 1 } }
             }

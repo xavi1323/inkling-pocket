@@ -4,7 +4,9 @@ import InklingCore
 import AgentCore
 
 public enum EnginePath: String, Sendable, CaseIterable {
-    /// Custom Metal kernels (Task 20); until then the same as `.reference`.
+    /// Fast path with routing on the GPU and no waits inside a token (`TurboPath`); near-exact.
+    case turbo
+    /// Custom Metal kernels; exact.
     case fast
     /// Plain MLX ops.
     case reference
@@ -82,7 +84,10 @@ public actor InklingGenerator: LanguageModel {
         self.path = path
         mappedWeightBytes = mappedBytes
         self.expertSlots = expertSlots
-        if path == .fast, let lm = model as? Inkling2LanguageModel {
+        if path == .turbo, let lm = model as? Inkling2LanguageModel {
+            generator = TokenGenerator(model: TurboPath(lm), eos: [tokenizer.eosID])
+            generator.pipelined = lm.expertCaches.isEmpty  // the table changes between tokens
+        } else if path == .fast, let lm = model as? Inkling2LanguageModel {
             generator = TokenGenerator(model: FastPath(lm), eos: [tokenizer.eosID])
             // Streaming reads routing back every layer, so there is nothing to overlap.
             generator.pipelined = lm.expertCaches.isEmpty
@@ -106,6 +111,7 @@ public actor InklingGenerator: LanguageModel {
     /// (reference, fast) models over the same weights; test models without the Inkling layers use themselves for both.
     func paths() -> (reference: CausalLM, fast: CausalLM) {
         if let fast = generator.model as? FastPath { return (fast.base, fast) }
+        if let turbo = generator.model as? TurboPath { return (turbo.base, turbo) }
         if let lm = generator.model as? Inkling2LanguageModel { return (lm, FastPath(lm)) }
         return (generator.model, generator.model)
     }

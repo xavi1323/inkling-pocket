@@ -33,6 +33,7 @@ public struct BenchmarkReport: Sendable, Equatable {
     public var guessRanks = ""
     /// Decode speed with no routing waits or expert reads (streaming only).
     public var ceiling = ""
+    public var turboSwaps = ""
     /// Expert read speed from storage, by read style.
     public var storage = ""
     public init() {}
@@ -55,6 +56,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Prefill time (whole prompt): \(prefillProfile.isEmpty ? "n/a" : prefillProfile)",
             "Decode time per token: \(decodeProfile.isEmpty ? "n/a" : decodeProfile)",
             "Read-ahead used, by guess rank: \(guessRanks.isEmpty ? "n/a" : guessRanks)",
+            "Turbo swaps: \(turboSwaps.isEmpty ? "n/a (not turbo)" : turboSwaps)",
             "Decode ceiling (no routing waits or reads): \(ceiling.isEmpty ? "n/a" : ceiling)",
             "Storage reads: \(storage.isEmpty ? "n/a" : storage)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
@@ -142,7 +144,7 @@ extension InklingGenerator {
     public func benchmark(promptTokens: Int = 512, decodeTokens: Int = 256,
                           progress: @escaping @Sendable (String) -> Void = { _ in }) throws -> BenchmarkReport {
         let (reference, fast) = paths()
-        let model = path == .fast ? fast : reference
+        let model = path == .reference ? reference : fast
         let paragraph = "The quick brown fox jumps over the lazy dog while the iPad keeps every token on device. "
         var tokens = tokenizer.encode(String(repeating: paragraph, count: max(1, promptTokens / 16 + 1)))
         tokens = Array(tokens.prefix(promptTokens))
@@ -153,6 +155,7 @@ extension InklingGenerator {
         gen.pipelined = generator.pipelined
         let profile = (reference as? Inkling2LanguageModel)?.profile
         let before = profile?.snapshot
+        let lmBefore = (reference as? Inkling2LanguageModel).map { ($0.turboSkipped, $0.turboPicks) }
         var afterPrefill: StreamProfile.Snapshot?
         gen.afterStep = { _ in if afterPrefill == nil { afterPrefill = profile?.snapshot } }
         try withError {
@@ -173,6 +176,11 @@ extension InklingGenerator {
         report.thermalState = MemoryInfo.thermalState()
         report.expertHitRate = expertHitRate
         report.expertSlots = expertSlots
+        if model is TurboPath, let lm = reference as? Inkling2LanguageModel, let (s0, p0) = lmBefore, lm.turboPicks > p0 {
+            let skipped = lm.turboSkipped - s0, picks = lm.turboPicks - p0
+            report.turboSwaps = String(format: "%.1f%% of expert picks ran a ready expert instead (%.1f per token)",
+                                       Double(skipped) / Double(picks) * 100, Double(skipped) / Double(max(gen.stats.generatedTokens - 1, 1)))
+        }
         if let profile, let before, let afterPrefill {
             let prefillSeconds = gen.stats.prefillTokensPerSecond > 0 ? Double(gen.stats.prefilledTokens) / gen.stats.prefillTokensPerSecond : 0
             report.prefillProfile = (afterPrefill - before).summary(tokens: 1, seconds: prefillSeconds)

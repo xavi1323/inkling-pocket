@@ -59,6 +59,51 @@ public final class Inkling2LanguageModel: CausalLM {
     /// One per MoE layer when experts are streamed.
     var expertCaches: [ExpertCache] { model.layers.compactMap { $0.moe.cache } }
 
+    /// Turbo: expert picks replaced by a ready expert, and experts read in after a token (totals).
+    private(set) var turboSkipped = 0, turboLoaded = 0, turboPicks = 0
+
+    /// Turbo, between tokens (no GPU work in flight): reads the last token's routing, counts uses, starts reading the
+    /// experts it missed, then gives every streamed layer its table for the next token.
+    func turboBoundary() {
+        let moes = model.layers.map(\.moe).filter { $0.cache != nil }
+        let routes = moes.flatMap { $0.turboRoutes.flatMap { [$0.wanted, $0.used] } }
+        if !routes.isEmpty { eval(routes) }
+        for moe in moes {
+            guard let cache = moe.cache else { continue }
+            var wanted: [Int] = [], used: [Int] = []
+            for r in moe.turboRoutes {
+                wanted += r.wanted.asArray(UInt32.self).map(Int.init)
+                used += r.used.asArray(UInt32.self).map(Int.init)
+            }
+            moe.turboRoutes = []
+            if !wanted.isEmpty {
+                cache.touch(wanted: wanted, used: used)
+                turboPicks += wanted.count
+                let ran = Set(used)
+                let missed = wanted.filter { !ran.contains($0) }
+                turboSkipped += missed.count
+                if !missed.isEmpty {
+                    let distinct = Array(Set(missed))
+                    turboLoaded += distinct.count
+                    cache.readIn(distinct, keepReady: moe.topK)
+                }
+            }
+            let (slots, ready) = cache.turboTable()
+            moe.turboTable = (MLXArray(slots), MLXArray(ready))
+        }
+    }
+
+    /// Back to exact routing (prompt chunks): drops the tables and pending routes.
+    func turboReset() {
+        for l in model.layers {
+            l.moe.turboTable = nil
+            l.moe.turboRoutes = []
+        }
+    }
+
+    /// Waits for turbo's background reads (tests).
+    func finishTurboLoads() { for c in expertCaches { c.waitForLoads() } }
+
     /// One cache per layer visit (48 for Inkling 2 Mini).
     public func makeCache() -> [LayerVisitCache] {
         config.layerVisits.map { InklingVisitCache(window: config.isSliding($0) ? config.slidingWindowSize : nil) }

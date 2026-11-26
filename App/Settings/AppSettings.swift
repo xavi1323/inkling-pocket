@@ -5,7 +5,13 @@ import InklingEngine
 
 extension EnginePath: Identifiable {
     public var id: String { rawValue }
-    var title: String { self == .fast ? "Fast (custom Metal)" : "Reference (plain MLX)" }
+    var title: String {
+        switch self {
+        case .turbo: "Turbo (fastest, near-exact)"
+        case .fast: "Fast (custom Metal, exact)"
+        case .reference: "Reference (plain MLX)"
+        }
+    }
 }
 
 /// User settings, saved in UserDefaults.
@@ -33,7 +39,12 @@ final class AppSettings {
         contextCap = defaults.object(forKey: "contextCap") as? Int ?? 16_384
         crawlTopN = defaults.object(forKey: "crawlTopN") as? Int ?? 3
         memoryBudgetOverrideGB = defaults.object(forKey: "memoryBudgetOverrideGB") as? Double ?? 0
-        enginePath = EnginePath(rawValue: defaults.string(forKey: "enginePath") ?? "") ?? .fast
+        // Turbo became the default; a saved Fast from before it existed moves to Turbo once (Settings can switch back).
+        if defaults.string(forKey: "enginePath") == EnginePath.fast.rawValue, !defaults.bool(forKey: "turboOffered") {
+            defaults.set(EnginePath.turbo.rawValue, forKey: "enginePath")
+        }
+        defaults.set(true, forKey: "turboOffered")
+        enginePath = EnginePath(rawValue: defaults.string(forKey: "enginePath") ?? "") ?? .turbo
         keepModelInPlace = defaults.object(forKey: "keepModelInPlace") as? Bool ?? false
     }
 }
