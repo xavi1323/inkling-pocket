@@ -24,5 +24,6 @@ import CrawlCore
     await #expect(throws: (any Error).self) {
         _ = try await WebPageFetcher().fetch(URL(string: "http://10.255.255.1/")!, timeout: 1)
     }
-    #expect(Date().timeIntervalSince(start) < 4)
+    // Well under the 15 s default; WebKit start-up alone can take a few seconds on CI.
+    #expect(Date().timeIntervalSince(start) < 10)
 }

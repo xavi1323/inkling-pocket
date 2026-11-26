@@ -35,7 +35,7 @@ public final class MappedSafetensors: @unchecked Sendable {
             let size = Int(st.st_size)
             let ptr = mmap(nil, size, PROT_READ, MAP_PRIVATE, fd, 0)
             close(fd)
-            guard let ptr, ptr != MAP_FAILED else { throw MappedSafetensorsError.cannotMap(url.lastPathComponent) }
+            guard let ptr, ptr != UnsafeMutableRawPointer(bitPattern: -1) else { throw MappedSafetensorsError.cannotMap(url.lastPathComponent) }
             let header = try SafetensorsHeader.read(url)
             if header.metadata[WeightRepacker.metadataKey] != "\(WeightRepacker.alignment)" { isAligned = false }
             mappings.append(Mapping(base: ptr, size: size))

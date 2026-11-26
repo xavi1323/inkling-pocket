@@ -15,3 +15,5 @@ DerivedData/
 .superpowers/
 .DS_Store
 InklingKit/Tests/CrawlCoreTests/Fixtures/local-pages/
+# tiny random-weight test model (synthetic, 0.5 MB) — not real model weights
+!InklingKit/Tests/InklingEngineTests/Fixtures/tiny-inkling/model.safetensors
