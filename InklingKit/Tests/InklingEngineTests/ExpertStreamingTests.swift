@@ -153,6 +153,20 @@ import InklingCore
         #expect(after.misses == before.misses && after.gpuWait == before.gpuWait)
     }
 
+    /// The benchmark's storage probe reads whole experts in every style.
+    @Test func storageProbeReadsWholeExperts() throws {
+        let model = try Self.streamed(slots: 3)
+        let cache = try #require(model.expertCaches.first)
+        let picked = cache.notResident(2)
+        #expect(picked.count == 2 && picked.allSatisfy { cache.slot(of: $0) == nil })
+        let perExpert = Int(ExpertCache.bytesPerExpert(path: "model.layers.0.mlp", weights: try MappedSafetensors(files: [Tiny.dir.appending(path: "model.safetensors")]), prefix: "language_model.", experts: cache.experts))
+        for chunk in [nil, 1000] {
+            let (bytes, seconds) = cache.probeRead(picked, direct: false, chunk: chunk)
+            #expect(bytes == 2 * perExpert && seconds >= 0)
+        }
+        #expect(InklingGenerator.storageSpeeds(model.expertCaches).contains("no file cache"))
+    }
+
     /// The benchmark's time breakdown counts every expert read.
     @Test func profileCountsReads() throws {
         let model = try Self.streamed(slots: 3)

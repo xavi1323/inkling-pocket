@@ -32,6 +32,8 @@ public struct BenchmarkReport: Sendable, Equatable {
     public var decodeProfile = ""
     /// Decode speed with no routing waits or expert reads (streaming only).
     public var ceiling = ""
+    /// Expert read speed from storage, by read style.
+    public var storage = ""
     public init() {}
 
     public var asText: String {
@@ -52,6 +54,7 @@ public struct BenchmarkReport: Sendable, Equatable {
             "Prefill time (whole prompt): \(prefillProfile.isEmpty ? "n/a" : prefillProfile)",
             "Decode time per token: \(decodeProfile.isEmpty ? "n/a" : decodeProfile)",
             "Decode ceiling (no routing waits or reads): \(ceiling.isEmpty ? "n/a" : ceiling)",
+            "Storage reads: \(storage.isEmpty ? "n/a" : storage)",
             "Pass overlap: \(passOverlap.isEmpty ? "n/a" : passOverlap)",
             "Routing:",
             routing,
@@ -102,6 +105,26 @@ public enum MemoryInfo {
 }
 
 extension InklingGenerator {
+    /// GB/s reading experts not in a slot: as the engine does now, split into 256 KB reads, and bypassing the OS
+    /// file cache. Each style reads different experts (2 per layer).
+    static func storageSpeeds(_ caches: [ExpertCache]) -> String {
+        let styles: [(String, Bool, Int?)] = [("whole parts", false, nil), ("256 KB reads", false, 256 << 10),
+                                              ("no file cache", true, nil), ("no file cache + 256 KB", true, 256 << 10)]
+        let samples = caches.map { $0.notResident(2 * styles.count) }
+        var parts: [String] = []
+        for (i, style) in styles.enumerated() {
+            var bytes = 0, seconds = 0.0
+            for (cache, sample) in zip(caches, samples) {
+                let picked = Array(sample.dropFirst(2 * i).prefix(2))
+                let (b, s) = cache.probeRead(picked, direct: style.1, chunk: style.2)
+                bytes += b
+                seconds += s
+            }
+            parts.append("\(style.0) " + String(format: "%.2f GB/s", seconds > 0 ? Double(bytes) / seconds / 1e9 : 0))
+        }
+        return parts.joined(separator: ", ")
+    }
+
     /// Times a ~`promptTokens` prefill and `decodeTokens` greedy decode (EOS ignored), then records routing on a short pass.
     public func benchmark(promptTokens: Int = 512, decodeTokens: Int = 256,
                           progress: @escaping @Sendable (String) -> Void = { _ in }) throws -> BenchmarkReport {
@@ -158,6 +181,10 @@ extension InklingGenerator {
                 parts.append("\(name) " + String(format: "%.1f tok/s", ceiling.stats.decodeTokensPerSecond))
             }
             report.ceiling = parts.joined(separator: ", ")
+        }
+        if let lm = reference as? Inkling2LanguageModel, !lm.expertCaches.isEmpty {
+            progress("Measuring storage reads…")
+            report.storage = Self.storageSpeeds(lm.expertCaches)
         }
         if let lm = reference as? Inkling2LanguageModel {
             progress("Recording expert routing…")

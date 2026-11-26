@@ -23,6 +23,7 @@ final class ExpertCache: @unchecked Sendable {
         /// Shard file and the tensor's offset in it: one `pread` per expert instead of a page fault per 16 KB.
         let fd: Int32
         let offset: Int64
+        let url: URL
     }
     static let agingPeriod: UInt64 = 2048
 
@@ -90,7 +91,7 @@ final class ExpertCache: @unchecked Sendable {
                     files[url] = fd
                 }
                 parts.append(Part(source: try weights.pointer(name), stride: stride, destination: destination,
-                                  fd: files[url]!, offset: offset))
+                                  fd: files[url]!, offset: offset, url: url))
                 bytes += Int64(slots * stride)
                 arrays.append(array)
             }
@@ -117,6 +118,59 @@ final class ExpertCache: @unchecked Sendable {
 
     deinit {
         for fd in files.values where fd >= 0 { close(fd) }
+    }
+
+    /// Benchmark: experts of this layer not in a slot (a random sample of `count`).
+    func notResident(_ count: Int) -> [Int] {
+        queue.sync { Array((0..<experts).filter { slotOf[$0] == nil }.shuffled().prefix(count)) }
+    }
+
+    /// Benchmark: reads `experts` into a scratch buffer the way slots are filled (all parts at once), through new
+    /// file handles; `direct` bypasses the OS file cache, `chunk` splits each part into reads of that many bytes.
+    /// Returns (bytes, seconds).
+    func probeRead(_ experts: [Int], direct: Bool, chunk: Int?) -> (Int, Double) {
+        var fds: [URL: Int32] = [:]
+        for part in parts where fds[part.url] == nil {
+            let fd = open(part.url.path, O_RDONLY)
+            #if canImport(Darwin)
+            if fd >= 0 {
+                _ = fcntl(fd, F_RDAHEAD, 0)
+                if direct { _ = fcntl(fd, F_NOCACHE, 1) }
+            }
+            #endif
+            fds[part.url] = fd
+        }
+        defer { for fd in fds.values where fd >= 0 { close(fd) } }
+        let perExpert = parts.map(\.stride).reduce(0, +)
+        var buffer: UnsafeMutableRawPointer?
+        guard posix_memalign(&buffer, 16384, max(experts.count * perExpert, 1)) == 0, let buffer else { return (0, 0) }
+        defer { free(buffer) }
+        // (fd, file offset, destination offset, length) for every read.
+        var reads: [(Int32, Int64, Int, Int)] = []
+        var destination = 0
+        for e in experts {
+            for part in parts {
+                let fd = fds[part.url]!, start = part.offset + Int64(e * part.stride)
+                let step = chunk ?? part.stride
+                for o in stride(from: 0, to: part.stride, by: step) {
+                    reads.append((fd, start + Int64(o), destination + o, min(step, part.stride - o)))
+                }
+                destination += part.stride
+            }
+        }
+        let jobs = reads, base = UInt(bitPattern: buffer)
+        let start = StreamProfile.now()
+        DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+            let (fd, offset, to, length) = jobs[i]
+            let target = UnsafeMutableRawPointer(bitPattern: base + UInt(to))!
+            var done = 0
+            while done < length {
+                let n = pread(fd, target + done, length - done, off_t(offset) + off_t(done))
+                if n <= 0 { break }
+                done += n
+            }
+        }
+        return (destination, Double(StreamProfile.now() - start) / 1e9)
     }
 
     /// Reads one expert's bytes of `part` into `slot` (falls back to copying from the mapping).
