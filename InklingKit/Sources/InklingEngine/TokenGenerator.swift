@@ -37,6 +37,8 @@ public final class TokenGenerator {
     public var prefillChunk = 256
     public var contextLimit = 16_384
     public private(set) var stats = GenerationStats()
+    /// Called after the prompt and after every generated token, once its logits are evaluated.
+    public var afterStep: (() -> Void)?
 
     private var cache: [LayerVisitCache]
     /// The last prompt, the cache state right after it, and its final logits.
@@ -73,6 +75,7 @@ public final class TokenGenerator {
         let snapshots = cache.compactMap { ($0 as? InklingVisitCache)?.snapshot() }
         mark = (prompt, snapshots.count == cache.count ? snapshots : [], logits!)
         if snapshots.count != cache.count { mark = nil }
+        afterStep?()
         stats.promptTokens = prompt.count
         stats.prefilledTokens = prompt.count - from
         let seconds = Date().timeIntervalSince(start)
@@ -94,6 +97,7 @@ public final class TokenGenerator {
         stats.decodeTokensPerSecond = 0
         while produced.count < maxTokens, prompt.count + produced.count < contextLimit, !shouldStop() {
             let token = sampler.sample(logits, history: history).item(Int32.self)
+            if !produced.isEmpty { afterStep?() }
             if produced.isEmpty {
                 stats.timeToFirstToken = ContinuousClock.now - started
                 decodeStart = .now

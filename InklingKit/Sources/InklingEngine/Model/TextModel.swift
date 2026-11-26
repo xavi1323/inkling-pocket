@@ -14,6 +14,7 @@ final class TextModel {
     let finalInput: AttentionResidual
     let norm: MLXArray
     var routing: RoutingStats?
+    var collector: RouteCollector?
 
     init(_ config: InklingTextConfig, loader: WeightLoader) throws {
         self.config = config
@@ -56,7 +57,13 @@ final class TextModel {
                 let scores = matmul(queries[index - loop.coreStart], bank.swappedAxes(-1, -2)) * (1 / d.squareRoot())
                 messages = matmul(softmax(scores, axis: -1), bank)
             }
-            let onRoute = routing.map { stats in { (experts: MLXArray) in stats.record(visit: visit, experts: experts) } }
+            var onRoute: ((MLXArray) -> Void)?
+            if routing != nil || collector != nil {
+                onRoute = { [routing, collector] experts in
+                    routing?.record(visit: visit, experts: experts)
+                    collector?.add(visit: visit, experts: experts)
+                }
+            }
             x = layers[index](x, blocks: &blocks, cache: cache?[visit], messages: messages, onRoute: onRoute)
         }
         return Ops.pick(finalInput(blocks, x), 0)

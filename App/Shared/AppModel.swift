@@ -68,7 +68,8 @@ final class AppModel {
         guard engineStatus != .loading else { return }
         engineStatus = .loading
         do {
-            let engine = try await InklingGenerator(modelFolder: folder, path: path)
+            let override = settings.memoryBudgetOverrideGB
+            let engine = try await InklingGenerator(modelFolder: folder, path: path, memoryBudgetGB: override > 0 ? override : nil)
             await engine.setContextLimit(settings.contextCap)
             model = engine
             loadedEngine = (folder, path)
@@ -78,6 +79,12 @@ final class AppModel {
             loadedEngine = nil
             engineStatus = .failed(String(describing: error))
         }
+    }
+
+    /// iOS is short of memory: let the engine drop part of its pinned experts.
+    func handleMemoryWarning() {
+        guard let engine = model as? InklingGenerator else { return }
+        Task { await engine.handleMemoryWarning() }
     }
 
     /// Stops every running generation (e.g. when the app goes to the background).

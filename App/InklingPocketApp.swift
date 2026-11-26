@@ -13,6 +13,9 @@ struct InklingPocketApp: App {
                 .environment(app.settings)
                 .modelContainer(app.container)
                 .task(id: EngineKey(folder: app.modelFolder, path: app.settings.enginePath)) { await app.loadEngineIfNeeded() }
+                .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+                    app.handleMemoryWarning()
+                }
         }
         .onChange(of: scenePhase) { _, phase in
             // iOS does not allow GPU work in the background; stop cleanly and keep the partial answer.

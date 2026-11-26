@@ -116,6 +116,7 @@ extension InklingGenerator {
         report.availableMemoryBytes = MemoryInfo.availableBytes()
         report.mappedWeightBytes = mappedWeightBytes
         report.thermalState = MemoryInfo.thermalState()
+        report.expertHitRate = residency?.hitRate
         if let lm = model as? Inkling2LanguageModel {
             progress("Recording expert routing…")
             let stats = RoutingStats(visits: lm.config.layerVisits, numExperts: lm.config.numExperts)

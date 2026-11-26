@@ -17,26 +17,62 @@ public actor InklingGenerator: LanguageModel {
     let generator: TokenGenerator
     /// Bytes of memory-mapped weight shards (0 for test models).
     public let mappedWeightBytes: Int64
+    /// Hot-expert residency over the mapped weights (nil for test models).
+    public let residency: ExpertResidency?
+    private var stepsSinceRebalance = 0
     public private(set) var stats = GenerationStats()
 
     /// Loads config, tokenizer and memory-mapped weights from an imported model folder.
-    public init(modelFolder: URL, path: EnginePath) async throws {
+    public init(modelFolder: URL, path: EnginePath, memoryBudgetGB: Double? = nil) async throws {
         let manifest = try ModelFolder.validate(modelFolder)
         let weights = try MappedSafetensors(manifest: manifest)
         let model = try Inkling2LanguageModel.load(manifest: manifest, weights: weights)
         let tokenizer = try InklingTokenizer(modelFolder: modelFolder)
-        self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes)
+        let config = model.config
+        let expertBytes = ExpertResidency.expertSizes(weights: weights, config: config).reduce(0, +) * Int64(config.numExperts)
+        let budget = max(0, MemoryBudget.current(overrideGB: memoryBudgetGB) - (weights.mappedBytes - expertBytes))
+        let residency = ExpertResidency(weights: weights, config: config, budget: budget)
+        model.collector = RouteCollector()
+        self.init(model: model, tokenizer: tokenizer, path: path, mappedBytes: weights.mappedBytes, residency: residency)
     }
 
-    init(model: CausalLM, tokenizer: InklingTokenizer, path: EnginePath = .reference, mappedBytes: Int64 = 0) {
+    init(model: CausalLM, tokenizer: InklingTokenizer, path: EnginePath = .reference, mappedBytes: Int64 = 0,
+         residency: ExpertResidency? = nil) {
         self.tokenizer = tokenizer
         self.path = path
         mappedWeightBytes = mappedBytes
+        self.residency = residency
         generator = TokenGenerator(model: model, eos: [tokenizer.eosID])
+        if let residency, let lm = model as? Inkling2LanguageModel, let collector = lm.collector {
+            let visits = lm.config.layerVisits
+            generator.afterStep = { [weak self] in
+                for (visit, experts) in collector.drain() {
+                    residency.record(layer: visits[visit], experts: experts)
+                    residency.prefetch(layer: visits[visit], experts: experts)
+                }
+                self?.noteStep()
+            }
+        }
     }
 
     /// (reference, fast) models over the same weights. The fast path arrives in Task 20; until then both are the reference.
     func paths() -> (reference: CausalLM, fast: CausalLM) { (generator.model, generator.model) }
+
+    /// Re-picks pinned experts every 32 steps.
+    nonisolated private func noteStep() {
+        Task { await self.countStep() }
+    }
+
+    private func countStep() {
+        stepsSinceRebalance += 1
+        if stepsSinceRebalance >= 32 {
+            stepsSinceRebalance = 0
+            residency?.rebalance()
+        }
+    }
+
+    /// iOS memory warning: shrink the pinned expert set (E10).
+    public func handleMemoryWarning() { residency?.handleMemoryWarning() }
 
     public nonisolated func countTokens(_ text: String) -> Int { tokenizer.encode(text).count }
 

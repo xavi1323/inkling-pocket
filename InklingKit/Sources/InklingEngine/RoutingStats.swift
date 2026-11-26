@@ -1,6 +1,18 @@
 import Foundation
 import MLX
 
+/// Keeps routed-expert id arrays from a forward pass without reading them back; drain after the pass is evaluated.
+public final class RouteCollector {
+    private(set) var items: [(visit: Int, experts: MLXArray)] = []
+    public init() {}
+    func add(visit: Int, experts: MLXArray) { items.append((visit, experts)) }
+    /// (visit, distinct expert ids) for everything collected since the last drain.
+    public func drain() -> [(visit: Int, experts: [Int])] {
+        defer { items.removeAll(keepingCapacity: true) }
+        return items.map { ($0.visit, Array(Set($0.experts.asType(.int32).reshaped([-1]).asArray(Int32.self).map(Int.init))).sorted()) }
+    }
+}
+
 /// Which experts each layer visit picked (Benchmark; residency in Task 19 uses the same counts).
 public final class RoutingStats: @unchecked Sendable {
     public let visits: [Int]

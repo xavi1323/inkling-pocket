@@ -13,6 +13,11 @@ public final class Inkling2LanguageModel: CausalLM {
         get { model.routing }
         set { model.routing = newValue }
     }
+    /// When set, routed expert ids are kept (not read back) for residency bookkeeping after each step.
+    public var collector: RouteCollector? {
+        get { model.collector }
+        set { model.collector = newValue }
+    }
 
     init(config: InklingTextConfig, loader: WeightLoader) throws {
         guard config.numSharedExperts == 0 else { throw ModelLoadError.unsupported("shared experts") }
