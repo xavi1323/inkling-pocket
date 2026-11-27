@@ -11,6 +11,8 @@ public final class InklingTokenizer: @unchecked Sendable {
     private let ranks: [[UInt8]: Int32]
     private let tokenBytes: [[UInt8]]          // id -> bytes (ordinary + specials)
     private let specials: [(String, Int32)]    // longest first
+    private let specialsAreBracketed: Bool     // every special is `<|…|>` (one-scan split)
+    private let longestSpecial: Int            // UTF-8 bytes
     private let specialIDs: [String: Int32]
     private let splitter: NSRegularExpression  // thread-safe for matching
     public let eosID: Int32
@@ -62,6 +64,8 @@ public final class InklingTokenizer: @unchecked Sendable {
         self.ranks = ranks
         self.tokenBytes = table
         self.specials = specialList.sorted { $0.0.utf8.count > $1.0.utf8.count }
+        self.specialsAreBracketed = specialList.allSatisfy { $0.0.hasPrefix("<|") && $0.0.hasSuffix("|>") && $0.0.utf8.count >= 4 }
+        self.longestSpecial = specialList.map { $0.0.utf8.count }.max() ?? 0
         self.specialIDs = Dictionary(specialList, uniquingKeysWith: { a, _ in a })
         self.splitter = try NSRegularExpression(pattern: pattern)
         self.eosID = specialIDs["<|content_model_end_sampling|>"] ?? 200_006
@@ -85,21 +89,47 @@ public final class InklingTokenizer: @unchecked Sendable {
 
     // MARK: Encode
 
-    public func encode(_ text: String) -> [Int32] {
+    public func encode(_ text: String) -> [Int32] { encodeWithCuts(text).tokens }
+
+    /// `encode`, plus the points right after each special token: (UTF-8 offset in `text`, tokens so far). Specials
+    /// split the text, so the tokens up to a cut never depend on what follows it (`PromptEncoder` reuses them).
+    public func encodeWithCuts(_ text: String) -> (tokens: [Int32], cuts: [(offset: Int, count: Int)]) {
         var out: [Int32] = []
+        var cuts: [(offset: Int, count: Int)] = []
         var rest = Substring(text)
         if text.contains("<|") {
             while let (range, id) = earliestSpecial(in: rest) {
                 encodeOrdinary(rest[rest.startIndex..<range.lowerBound], into: &out)
                 out.append(id)
+                cuts.append((text.utf8.distance(from: text.startIndex, to: range.upperBound), out.count))
                 rest = rest[range.upperBound...]
             }
         }
         encodeOrdinary(rest, into: &out)
-        return out
+        return (out, cuts)
     }
 
+    /// The first special token in `text` (longest wins at the same start). One scan: every special here has the
+    /// form `<|…|>`, so only the spots that start with `<|` are checked; anything else falls back to a full search.
     private func earliestSpecial(in text: Substring) -> (Range<Substring.Index>, Int32)? {
+        guard specialsAreBracketed else { return earliestSpecialSlow(in: text) }
+        var from = text.startIndex
+        while let open = text[from...].range(of: "<|") {
+            var best: (Range<Substring.Index>, Int32)?
+            var search = open.upperBound
+            // Every `|>` after this `<|` up to the longest special's length: the longest special wins.
+            while let close = text[search...].range(of: "|>"),
+                  text.utf8.distance(from: open.lowerBound, to: close.upperBound) <= longestSpecial {
+                if let id = specialIDs[String(text[open.lowerBound..<close.upperBound])] { best = (open.lowerBound..<close.upperBound, id) }
+                search = close.lowerBound < text.endIndex ? text.index(after: close.lowerBound) : text.endIndex
+            }
+            if let best { return best }
+            from = open.upperBound
+        }
+        return nil
+    }
+
+    private func earliestSpecialSlow(in text: Substring) -> (Range<Substring.Index>, Int32)? {
         var best: (Range<Substring.Index>, Int32)?
         for (s, id) in specials {
             if let r = text.range(of: s), best == nil || r.lowerBound < best!.0.lowerBound {

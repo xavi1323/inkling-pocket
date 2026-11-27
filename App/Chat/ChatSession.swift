@@ -3,6 +3,7 @@ import SwiftData
 import InklingCore
 import AgentCore
 import PocketMemory
+import InklingEngine
 
 /// One chat: sends messages through the agent, streams the reply, stores the result.
 @Observable @MainActor
@@ -17,6 +18,9 @@ final class ChatSession {
     /// The reply being written (nil when idle).
     private(set) var turn: ChatTurnState?
     private(set) var lastSpeed: Double?
+    /// The engine's numbers for the last finished reply (all its steps), shown from the speed button.
+    private(set) var lastReply: ReplyStats?
+    @ObservationIgnored private var statsMark = 0
     var errorMessage: String?
 
     var isRunning: Bool { turn?.isRunning ?? false }
@@ -44,6 +48,7 @@ final class ChatSession {
         let history = chat.orderedMessages.compactMap(\.chatMessage)
         let agent = agentFactory()
         turn = ChatTurnState()
+        statsMark = EngineStatsLog.shared.count
         generation += 1
         let gen = generation
         task = Task { [weak self] in
@@ -79,6 +84,8 @@ final class ChatSession {
     private func finishTurn() {
         guard let state = turn else { return }
         lastSpeed = state.tokensPerSecond ?? lastSpeed
+        let steps = EngineStatsLog.shared.since(statsMark)
+        if !steps.isEmpty { lastReply = ReplyStats(steps) }
         let messages = ChatSessionLogic.messagesToSave(state)
         append(messages, stoppedLast: state.stopped)
         turn = nil

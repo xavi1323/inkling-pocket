@@ -125,7 +125,7 @@ final class Attention {
             mask = concatenated([mask, sinks], axis: -1)
             return Ops.attention(q: q, k: k, v: v, scale: scale, mask: mask)
         }
-        let step = Self.queryBlock  // read once: tests change it
+        let step = Self.blockSize(heads: nHeads, keys: size + 1)
         guard length > step else { return block(0, length) }
         // Long chunks: one query block at a time, so the [H, block, keys] mask stays small however long the chunk.
         Self.queryBlockedCalls += 1
@@ -138,8 +138,19 @@ final class Attention {
         return concatenated(outs, axis: 2)
     }
 
-    /// Queries per attention block in prompt chunks (the mask is [heads, block, keys]).
+    /// Queries per attention block in prompt chunks (the mask is [heads, block, keys]); the most `blockSize` gives.
     nonisolated(unsafe) static var queryBlock = 512
+    /// The mask of one query block stays under this (its temporaries are a few times more): at 16K keys a 512-query
+    /// mask is ~0.4 GB, a jetsam risk next to the expert slots.
+    static let maskBudget = 64 << 20
+
+    /// Queries per block for `keys` keys: `queryBlock`, or fewer (multiples of 64, at least 64) so the
+    /// [heads, block, keys] mask stays under `maskBudget`. Each query row is computed on its own: same results.
+    static func blockSize(heads: Int, keys: Int) -> Int {
+        let step = queryBlock  // read once: tests change it
+        let fit = maskBudget / max(1, heads * keys * 2)
+        return max(min(step, 64), min(step, fit / 64 * 64))
+    }
     nonisolated(unsafe) static var queryBlockedCalls = 0
 
     /// Output gate and projection of `attend`'s result, pure.

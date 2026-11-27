@@ -34,6 +34,7 @@ struct ChatView: View {
         }
         .overlay(alignment: .bottom) {
             ComposerBar(draft: $draft, isRunning: session.isRunning, speed: session.tokensPerSecond,
+                        details: session.lastReply?.lines,
                         send: { session.send(draft); draft = "" }, stop: session.stop)
                 .padding(.horizontal, 24)
                 .padding(.bottom, 12)

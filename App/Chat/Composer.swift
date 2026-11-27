@@ -5,6 +5,7 @@ struct ComposerBar: View {
     @Binding var draft: String
     let isRunning: Bool
     let speed: Double?
+    let details: [String]?
     let send: @MainActor () -> Void
     let stop: @MainActor () -> Void
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -13,7 +14,7 @@ struct ComposerBar: View {
     var body: some View {
         GlassEffectContainer(spacing: 12) {
             HStack(alignment: .bottom, spacing: 12) {
-                SpeedHUD(tokensPerSecond: speed, isRunning: isRunning)
+                SpeedHUD(tokensPerSecond: speed, isRunning: isRunning, details: details)
                     .modifier(GlassOrMaterial(shape: Capsule(), reduce: reduceTransparency))
                 HStack(alignment: .bottom, spacing: 8) {
                     TextField("Message Inkling", text: $draft, axis: .vertical)

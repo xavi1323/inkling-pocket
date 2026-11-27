@@ -1,5 +1,8 @@
 import Foundation
 import MLX
+#if canImport(Metal)
+import Metal
+#endif
 
 /// Launch settings for the decode kernels, picked on the device: each candidate runs on this model's real expert
 /// slots (and attention shapes), must match the default kernel's output, and the fastest wins if it beats the
@@ -7,14 +10,17 @@ import MLX
 final class KernelTuning: @unchecked Sendable {
     static let shared = KernelTuning()
 
-    struct Launch: Equatable, CustomStringConvertible {
+    struct Launch: Equatable, Codable, CustomStringConvertible {
         var values: Int   // values per lane step (8 = one 8-value block; 16/32 = one wide load)
         var threads: Int  // threadgroup size
         var description: String { "\(values)×\(threads)" }
         static let standard = Launch(values: 8, threads: 256)
     }
 
-    struct MoE: Equatable { var gateUp = Launch.standard, down = Launch.standard }
+    struct MoE: Equatable, Codable { var gateUp = Launch.standard, down = Launch.standard }
+
+    /// A tuning result kept between launches; `key` names the GPU, OS and kernel shapes it is valid for.
+    struct Saved: Codable { var key: String, moe: MoE, attentionGroups: Int, report: String }
 
     private let lock = NSLock()
     private var _moe = MoE()
@@ -65,11 +71,30 @@ final class KernelTuning: @unchecked Sendable {
     }
 
     /// Tunes on `model`'s first streamed MoE layer and first global attention layer. GPU (fused path) only.
-    func tune(_ model: Inkling2LanguageModel) {
+    /// With `saved`: reuses the result kept there for this GPU, OS and model shapes (tuning costs ~1 s of GPU time
+    /// and hundreds of kernel builds at every launch otherwise), and keeps a new result there.
+    func tune(_ model: Inkling2LanguageModel, saved url: URL? = nil) {
         #if canImport(Metal)
         guard Ops.useFused, Device.defaultDevice().deviceType == .gpu,
               let layer = model.model.layers.first(where: { $0.moe.fused.kernelSupported }) else { return }
         let fused = layer.moe.fused
+        let attention0 = model.model.layers.map(\.attention).first { $0.sliding == 0 } ?? layer.attention
+        let key = [MTLCreateSystemDefaultDevice()?.name ?? "gpu", ProcessInfo.processInfo.operatingSystemVersionString,
+                   "\(fused.down.weight.dim(1))x\(fused.gate.weight.dim(1))", "\(fused.gate.bits)/\(fused.up.bits)/\(fused.down.bits)",
+                   "k\(layer.moe.topK)", "h\(attention0.nHeads)/\(attention0.nKV)x\(attention0.headDim)"].joined(separator: "|")
+        if let url, let data = try? Data(contentsOf: url), let s = try? JSONDecoder().decode(Saved.self, from: data), s.key == key {
+            lock.withLock {
+                _moe = s.moe
+                _attentionGroups = s.attentionGroups
+                report = s.report + " (saved)"
+            }
+            return
+        }
+        defer {
+            if let url, let data = try? JSONEncoder().encode(Saved(key: key, moe: moe, attentionGroups: attentionGroups, report: report)) {
+                try? data.write(to: url, options: .atomic)
+            }
+        }
         let slots = fused.gate.weight.dim(0), k = layer.moe.topK, d = fused.down.weight.dim(1)
         let dtype = fused.gate.scales!.dtype
         let x = (MLXRandom.normal([d], key: MLXRandom.key(7)) * 0.5).asType(dtype)

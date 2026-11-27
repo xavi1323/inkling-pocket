@@ -350,6 +350,13 @@ public final class TokenGenerator {
         }
     }
 
+    /// Memory warning: forget the saved cache states (they keep K/V buffers alive). The next prompt starts over
+    /// (the instructions' prefix is still restored from its file or recomputed).
+    public func dropSavedStates() {
+        resumeMarks = []
+        mark = nil
+    }
+
     /// The state after `tokens` (prompt + what was fed since) is kept for the next prompt: the end of the reply.
     private func keepResume(_ tokens: [Int32], logits: MLXArray?) {
         guard tokens.count > (mark?.tokens.count ?? 0) else { return }

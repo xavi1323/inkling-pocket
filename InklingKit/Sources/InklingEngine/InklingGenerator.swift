@@ -27,6 +27,24 @@ public actor InklingGenerator: LanguageModel {
     /// Working memory kept free for the KV cache, activations and Metal scratch on top of `MemoryBudget`'s margin.
     /// Peak use stayed ~1 GB under the budget with 0.8 GB here; 0.5 GB still covers a long chat's K/V.
     static let workingReserve: Int64 = 500_000_000
+    /// The chat length the reserve is sized for: long agent chats with web results reach this; past it K/V grows
+    /// into the system's share (fine unless the system is short too: then the memory warning drops saved states).
+    static let reservedContext = 8_192
+
+    /// Memory kept free for everything but weights and slots: K/V for a full `reservedContext` chat (global visits
+    /// grow with the chat; sliding visits keep one window), one attention mask block, and 0.3 GB for activations
+    /// and MLX's buffer cache. Never less than `workingReserve`.
+    static func reserve(for text: InklingTextConfig) -> Int64 {
+        var kv: Int64 = 0
+        for layer in text.layerVisits {
+            let sliding = text.isSliding(layer)
+            let heads = Int64(sliding ? text.swaNumKeyValueHeads : text.numKeyValueHeads)
+            let dim = Int64(sliding ? text.swaHeadDim : text.headDim)
+            let tokens = Int64(sliding ? min(text.slidingWindowSize, reservedContext) : reservedContext)
+            kv += heads * dim * 2 * 2 * tokens  // K and V, 2 bytes each
+        }
+        return max(workingReserve, 300_000_000 + kv + Int64(Attention.maskBudget))
+    }
     static let mlxCacheLimit = 256 << 20
 
     /// Gives memory freed by a dropped engine back to iOS (call after releasing the old engine, before loading).
@@ -62,7 +80,7 @@ public actor InklingGenerator: LanguageModel {
         let heat = heatURL.flatMap { try? Data(contentsOf: $0) }
             .flatMap { try? JSONDecoder().decode(Inkling2LanguageModel.HeatFile.self, from: $0) }
             .flatMap { $0.identity == identity ? $0 : nil }
-        let budget = MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert - Self.workingReserve
+        let budget = MemoryBudget.current(overrideGB: memoryBudgetGB) - nonExpert - Self.reserve(for: text)
         let slots = heat.flatMap { Self.heatPlan(budget: budget, perLayer: perLayer, heat: $0.layers, experts: text.numExperts,
                                                  topK: text.expertsPerToken) }
             ?? Self.slotPlan(budget: budget, perLayer: perLayer, visits: visits, experts: text.numExperts, topK: text.expertsPerToken)
@@ -93,7 +111,11 @@ public actor InklingGenerator: LanguageModel {
         let lm = paths().reference as? Inkling2LanguageModel
         lm?.smartRouting = smartRouting
         // Pick the fastest kernel launch settings for this GPU first, so the warm-up builds the chosen ones.
-        if let lm { KernelTuning.shared.tune(lm) }
+        if let lm {
+            let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+                .appending(path: "inkling-kernel-tuning.json")
+            KernelTuning.shared.tune(lm, saved: url)
+        }
         let prompt = tokenizer.encode("Hello! Say hi back in one short sentence.")
         guard !prompt.isEmpty else { return }
         _ = try? withError {
@@ -196,7 +218,17 @@ public actor InklingGenerator: LanguageModel {
     }
 
     /// iOS memory warning. Expert slots are a fixed size chosen at load, so there is nothing to shrink here.
-    public nonisolated func handleMemoryWarning() {}
+    /// iOS is short of memory: drop MLX's freed-buffer cache now, and the saved cache states (agent-step resume points
+    /// and the like, which hold K/V buffers alive) before the next reply. Expert slots stay: they are the speed.
+    public nonisolated func handleMemoryWarning() {
+        Memory.clearCache()
+        Task(priority: .high) { await self.relieveMemory() }
+    }
+
+    private func relieveMemory() {
+        generator.dropSavedStates()
+        Memory.clearCache()
+    }
 
     /// Settings → Memory budget changed (GB, nil = automatic). Slots are sized at load: applies on the next load.
     public nonisolated func setMemoryBudget(gb: Double?) {}
@@ -227,8 +259,8 @@ public actor InklingGenerator: LanguageModel {
 
     private func run(_ messages: [ChatMessage], _ tools: [ToolSpec], _ effort: ReasoningEffort,
                      _ parameters: GenerateParameters, _ out: AsyncThrowingStream<ModelEvent, Error>.Continuation) throws {
-        let prompt = tokenizer.encode(PromptFormatter.render(messages: messages, tools: tools, effort: effort))
-        let stablePrefix = Self.stablePrefixLength(prompt, messages, tools, effort, tokenizer)
+        let prompt = promptEncoder.encode(PromptFormatter.render(messages: messages, tools: tools, effort: effort))
+        let stablePrefix = stablePrefixLength(prompt, messages, tools, effort)
         guard prompt.count < generator.contextLimit else {
             throw GenerationError.contextFull(prompt: prompt.count, limit: generator.contextLimit)
         }
@@ -271,6 +303,7 @@ public actor InklingGenerator: LanguageModel {
             return ended
         }
         stats = generator.stats
+        EngineStatsLog.shared.append(stats)
         if !Task.isCancelled, !ended { out.yield(.end) }
         keepPrefixForNextLaunch()
         keepHeatForNextLaunch()
@@ -280,6 +313,22 @@ public actor InklingGenerator: LanguageModel {
         guard let heatURL, let lm = paths().reference as? Inkling2LanguageModel, !lm.expertCaches.isEmpty,
               let data = try? JSONEncoder().encode(lm.heat(identity: promptCacheIdentity)) else { return }
         try? data.write(to: heatURL, options: .atomic)
+    }
+
+    /// Encodes prompts, reusing the last prompt's tokens (the conversation so far).
+    private lazy var promptEncoder = PromptEncoder(tokenizer: tokenizer)
+    /// The last stable head: its rendered text and tokens (the same for every turn with these settings).
+    private var stableHead: (text: String, tokens: [Int32])?
+
+    /// `stablePrefixLength`, encoding the head only when it changed.
+    private func stablePrefixLength(_ prompt: [Int32], _ messages: [ChatMessage], _ tools: [ToolSpec],
+                                    _ effort: ReasoningEffort) -> Int {
+        let leading = Array(messages.prefix { $0.role == .system })
+        guard !leading.isEmpty else { return 0 }
+        let text = PromptFormatter.render(messages: leading, tools: tools, effort: effort)
+        let head = stableHead?.text == text ? stableHead!.tokens : tokenizer.encode(text)
+        stableHead = (text, head)
+        return head.count < prompt.count && prompt.starts(with: head) ? head.count : 0
     }
 
     /// Tokens of tools + leading system messages + effort line: the same for every chat with these settings.
